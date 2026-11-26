@@ -22,12 +22,18 @@ However, thanks to [UnsignedChad's CVE-2026-21155](https://github.com/UnsignedCh
 - The bootloader is probably not very good, it was just enough to boot mainline Linux just enough in an Android boot image. My hope is that by getting this out, that it can be improved by others.
 - Probably others I am forgetting...
 
+## Other devices
+
+- **Galaxy Tab S2 8.0 LTE (SM-T715)**: a port is in [`t715/`](t715/README.md), with a loader of its own for this tablet's S-Boot. That loader hands control back to S-Boot when it has nothing to start, reads the kernel through S-Boot's own eMMC reader and starts it only if a hash matches, keeps the kernel in two slots of the CACHE partition, and gives the tablet back to its own kernel after a failed boot. It starts the tablet with all eight cores in 64 bits, every day. What was found about this S-Boot and about arm64 Linux on it is in [`t715/docs/FINDINGS.md`](t715/docs/FINDINGS.md).
+
 ## Building
 To build a PARAM image (which contains bnuuyloader), you will need the `sboot.bin` and `param.bin` for your device (the S-Boot and PARAM must match the firmware on your device). You will also need LLVM/Clang to crosscompile the AArch32/AArch64 parts of bnuuyloader, as well as Python to run the build script.
 
 You first need to install the dependencies `python3 -m pip install -r requirements.txt`, then you can run `python3 build.py --stock-param <path to original param> --sboot <path to original sboot>`. If everything goes right, it should build a `PARAM_bnuuyloader.tar`, which you can flash using Odin.
 
 This has only been tested on the Note 4 Exynos, with firmware `N910CXXS2DRI2`, it may need adjusting for other firmwares, you may need to edit `payload_layout.py` if any issues occur.
+
+The allocator's signature is the same code on other Exynos 5433 devices, but the heap base in the literal pool after it is not: `build.py --heap-base 0x24F00000` finds the place in the SM-T715's S-Boot, where the default refuses and names the heap base it met.
 
 Please bare in mind that bnuuyloader does not support booting AArch32 kernels, it is assumed that you are using bnuuyloader to only run AArch64 kernels, as that is the main point of bnuuyloader.
 

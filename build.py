@@ -70,13 +70,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stock-param", required=True, type=Path, help="stock param.bin from the selected BL build")
     parser.add_argument("--sboot", required=True, type=Path, help="matching sboot.bin for allocator signature scan")
+    parser.add_argument("--heap-base", type=lambda value: int(value, 0), default=0x24E00000,
+                        help="heap base in the allocator's literal pool: 0x24E00000 on the N910C, 0x24F00000 on the SM-T715")
     parser.add_argument("--logo", type=Path, default=ROOT / "assets/logo.png")
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     stock = args.stock_param.read_bytes()
     sboot = args.sboot.read_bytes()
-    return_target = find_large_heap_sentinel(sboot)
+    return_target = find_large_heap_sentinel(sboot, args.heap_base)
     print(f"S-Boot large-heap sentinel: {return_target:#010x}")
 
     with TemporaryDirectory(prefix="bnuuyloader-") as temporary:

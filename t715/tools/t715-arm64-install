@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 elkir0
+
+# t715-arm64-install: put the arm64 system on the SM-T715, from the computer, over omarchy-tab-s2's ssh link
+# (device/tssh, root@172.16.42.1). The tablet may run either system (the 32-bit one in BOOT, or the
+# arm64 one): every step works on what both have (tar, dd, sha256sum, /run/t715/userdata).
+#
+#   t715-arm64-install status
+#   t715-arm64-install rootfs NAME IMAGE [--replace]   the image's tree into USERDATA/NAME, streamed
+#                                                      (nothing stored on the tablet but the tree)
+#   t715-arm64-install modules NAME TARBALL            the kernel's modules.tar.xz into NAME/usr/lib/modules
+#   t715-arm64-install kernel IMAGE DTB                the slot not newest gets IMAGE + DTB, generation + 1
+#   t715-arm64-install loader PARAM_IMAGE              the loader into PARAM, for good (verified; no reboot)
+#   t715-arm64-install unloader [--no-32bit-root-ok]   the original PARAM back; refused while BOOT's
+#                                                      32-bit kernel has no root behind it (since
+#                                                      2026-11-25) unless the flag says it is wanted
+#
+# What it never does: write anything but USERDATA/NAME, a slot of CACHE (scripts/slot.py) and PARAM;
+# reboot; touch the 32-bit root USERDATA/omarchy. NAME is a plain name (letters, digits, - _ .).
+# The image is mounted read-only in a privileged container (t715-kbuild) and its tree streamed with
+# tar (numeric owners, ACLs, extended attributes: file capabilities survive).
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+PORT=$(cd "$HERE/.." && pwd)
+LDR=$(cd "$PORT/loader" && pwd)
+T="${T715_TSSH:-}"
+[ -n "$T" ] || T="$(cd "$HERE/"../../.. && pwd)/omarchy-tab-s2/device/tssh" || true
+UD=/run/t715/userdata
+ORIG="$LDR/dumps/PARAM-mmcblk0p8.bin"
+ORIG_SHA="${ORIG_SHA:?set ORIG_SHA to the SHA-256 of your own stock PARAM image}"
+# A loader is the first LOADER_BYTES of PARAM (the archive S-Boot reads its logo from). S-Boot
+# writes data of its own after them whenever it boots a kernel itself (a fallback boot: 2026-11-25),
+# so PARAM is named by that part's sha256, never by the whole partition's; a write is still
+# verified by the whole partition's.
+LOADER_BYTES=7340032
+IMAGE_TOOL="${T715_KBUILD_IMAGE:-t715-kbuild}"
+
+die() { echo "t715-arm64-install: $*" >&2; exit 1; }
+abspath() { case "$1" in /*) printf "%s" "$1" ;; *) printf "%s/%s" "$(pwd)" "$1" ;; esac; }   # slot.py runs from the loader's directory
+say() { echo ">>> $*"; }
+tab() { "$T" "$@" < /dev/null; }
+up() { tab 'echo up' 2>/dev/null | grep -q up; }
+valid_name() { case "$1" in '' | .* | *[!A-Za-z0-9_.-]* | omarchy) return 1 ;; esac; return 0; }
+
+need_tablet() {
+    up || die "the tablet does not answer over ssh"
+    tab "test -d $UD" || die "no $UD on the tablet (USERDATA not mounted where both systems put it)"
+}
+
+param_sha() { tab 'sha256sum /dev/mmcblk0p8 | cut -c1-64' 2>/dev/null | tr -d '\r'; }
+param_id() { tab "head -c $LOADER_BYTES /dev/mmcblk0p8 | sha256sum | cut -c1-64" 2>/dev/null | tr -d '\r'; }
+file_id() { head -c "$LOADER_BYTES" "$1" | shasum -a 256 | cut -c1-64; }
+orig_id() { file_id "$ORIG"; }
+
+write_param() {   # $1 = local image; echoes the partition's sha256 after the write
+    cat "$1" | "$T" 'blockdev --setrw /dev/mmcblk0p8 && cat > /dev/mmcblk0p8 && sync && blockdev --setro /dev/mmcblk0p8 && sha256sum /dev/mmcblk0p8 | cut -c1-64' 2>/dev/null | tr -d '\r'
+}
+
+cmd_status() {
+    need_tablet
+    tab "printf 'system: %s %s, up %s\n' \"\$(uname -m)\" \"\$(uname -r)\" \"\$(uptime -p 2>/dev/null || uptime)\";
+         printf 'USERDATA: '; df -h $UD | tail -1 | awk '{print \$4\" free of \"\$2}';
+         for d in $UD/*/; do n=\$(basename \$d); [ \"\$n\" = media ] || [ \"\$n\" = lost+found ] && continue;
+             a=\$(dd if=\$d/usr/lib/systemd/systemd bs=1 skip=18 count=1 2>/dev/null | od -An -tx1 | tr -d ' ');
+             printf '  root %-18s %s\n' \"\$n\" \"\$( [ \"\$a\" = b7 ] && echo aarch64 || echo 'not aarch64')\"; done;
+         printf 'battery: %s%%\n' \"\$(cat /sys/class/power_supply/*/capacity 2>/dev/null | head -1)\""
+    local sha id f name; sha=$(param_sha); id=$(param_id)
+    case "$id" in
+        "$(orig_id)") echo "PARAM: the original (no loader)" ;;
+        *) name=
+           for f in "$LDR"/out/kboot*.param; do
+               if [ "$(file_id "$f")" = "$id" ]; then
+                   name=$(basename "$f")
+                   [ "$(shasum -a 256 "$f" | cut -c1-64)" = "$sha" ] || name="$name, S-Boot's data changed since (a fallback boot)"
+               fi
+           done
+           echo "PARAM: ${id:0:16}… ($name)" ;;
+    esac
+    (cd "$LDR" && venv/bin/python -I scripts/slot.py show) | sed 's/^/  /'
+}
+
+cmd_rootfs() {
+    local name=$1 image=$2 replace=${3:-}
+    valid_name "$name" || die "'$name' is not a root name this tool may write (and never 'omarchy', the 32-bit root)"
+    [ -f "$image" ] || die "no image $image"
+    need_tablet
+    if tab "test -e $UD/$name"; then
+        [ "$replace" = --replace ] || die "USERDATA/$name exists: --replace deletes it first"
+        say "deleting USERDATA/$name"
+        tab "rm -rf --one-file-system $UD/$name" || die "could not delete USERDATA/$name"
+    fi
+    tab "rm -rf --one-file-system $UD/$name.part"
+    local free used
+    free=$(tab "df -k --output=avail $UD | tail -1" | tr -d ' \r')
+    used=$(du -k "$image" | cut -f1)
+    [ "$free" -gt $((used + 1048576)) ] || die "USERDATA has ${free} KiB free, the image holds about ${used} KiB (+1 GiB margin)"
+    say "streaming $(basename "$image") into USERDATA/$name (about $((used / 1024)) MiB)"
+    local start; start=$(date +%s)
+    docker run --rm --privileged --platform linux/arm64 -v "$image:/img:ro" "$IMAGE_TOOL" sh -c \
+        'L=$(losetup -r -f --show /img) && mkdir -p /m && mount -o ro,noload "$L" /m && tar -C /m --numeric-owner --acls --xattrs --xattrs-include="*" -cpf - . ; s=$?; umount /m; losetup -d "$L"; exit $s' \
+        | "$T" "mkdir -p $UD/$name.part && tar -C $UD/$name.part --numeric-owner --acls --xattrs --xattrs-include='*' -xpf - && sync && mv $UD/$name.part $UD/$name && echo TREE-OK" \
+        | grep -q TREE-OK || die "the stream did not complete: USERDATA/$name.part left for a look"
+    say "done in $(( $(date +%s) - start )) s"
+    tab "a=\$(dd if=$UD/$name/usr/lib/systemd/systemd bs=1 skip=18 count=1 2>/dev/null | od -An -tx1 | tr -d ' '); [ \"\$a\" = b7 ]" \
+        || die "USERDATA/$name/usr/lib/systemd/systemd is not an aarch64 ELF"
+    say "USERDATA/$name holds an aarch64 system ($(tab "du -sh $UD/$name | cut -f1" | tr -d '\r'))"
+}
+
+cmd_modules() {
+    local name=$1 tarball=$2
+    valid_name "$name" || die "'$name' is not a root name this tool may write"
+    [ -f "$tarball" ] || die "no $tarball"
+    need_tablet
+    tab "test -d $UD/$name/usr" || die "no root USERDATA/$name"
+    local rel
+    rel=$(tar -tJf "$tarball" | sed -n 's|^\./lib/modules/\([^/]*\)/$|\1|p; s|^lib/modules/\([^/]*\)/$|\1|p' | head -1)
+    [ -n "$rel" ] || die "no lib/modules/<release>/ in $tarball"
+    say "modules $rel into USERDATA/$name/usr/lib/modules"
+    cat "$tarball" | "$T" "set -e; rm -rf /tmp/t715-mods; mkdir -p /tmp/t715-mods; xz -dc | tar -C /tmp/t715-mods -xf -;
+        mkdir -p $UD/$name/usr/lib/modules; rm -rf $UD/$name/usr/lib/modules/$rel;
+        cp -a /tmp/t715-mods/lib/modules/$rel $UD/$name/usr/lib/modules/; rm -rf /tmp/t715-mods; sync;
+        ls $UD/$name/usr/lib/modules/$rel/modules.dep >/dev/null && echo MODS-OK" | grep -q MODS-OK || die "modules not installed"
+    say "modules installed: $(tab "find $UD/$name/usr/lib/modules/$rel -name '*.ko*' | wc -l" | tr -d '\r') files"
+}
+
+cmd_kernel() {
+    local image dtb
+    image=$(abspath "$1"); dtb=$(abspath "$2")
+    [ -f "$image" ] && [ -f "$dtb" ] || die "no $image or $dtb"
+    need_tablet
+    local show gA gB letter gen
+    show=$(cd "$LDR" && venv/bin/python -I scripts/slot.py show)
+    gA=$(echo "$show" | sed -n 's/^slot A .*generation \([0-9]*\),.*bytes are as the header says.*/\1/p')
+    gB=$(echo "$show" | sed -n 's/^slot B .*generation \([0-9]*\),.*bytes are as the header says.*/\1/p')
+    gA=${gA:-0}; gB=${gB:-0}
+    if [ "$gA" -ge "$gB" ]; then letter=B; else letter=A; fi
+    gen=$(( (gA > gB ? gA : gB) + 1 ))
+    say "slot $letter gets generation $gen (A holds ${gA}, B ${gB}; 0 = none)"
+    (cd "$LDR" && venv/bin/python -I scripts/slot.py write "$letter" "$gen" "$image" "$dtb") || die "slot write failed"
+}
+
+cmd_loader() {
+    local img
+    img=$(abspath "$1")
+    [ -f "$img" ] || die "no $img"
+    need_tablet
+    local local_sha local_id before got
+    local_sha=$(shasum -a 256 "$img" | cut -c1-64)      # the whole image: what the write must read back
+    local_id=$(file_id "$img")
+    before=$(param_id)
+    case "$before" in
+        "$(orig_id)"|"$local_id") ;;
+        *) for f in "$LDR"/out/kboot*.param; do [ "$(file_id "$f")" = "$before" ] && known=1; done
+           [ "${known:-0}" = 1 ] || die "PARAM holds neither the original nor a known loader: not writing" ;;
+    esac
+    got=$(write_param "$img")
+    [ "$got" = "$local_sha" ] || die "PARAM NOT verified (tablet $got, local $local_sha)"
+    say "PARAM holds $(basename "$img") (${local_sha:0:16}…): every boot runs the loader from now on"
+}
+
+cmd_unloader() {
+    [ -f "$ORIG" ] || die "no original PARAM at $ORIG"
+    need_tablet
+    if ! tab "test -d $UD/omarchy/usr/bin" && [ "${1:-}" != --no-32bit-root-ok ]; then
+        die "USERDATA/omarchy is gone: the original PARAM would boot BOOT's 32-bit kernel with no root. Write the Golden rescue to BOOT first, or pass --no-32bit-root-ok"
+    fi
+    local got; got=$(write_param "$ORIG")
+    [ "$got" = "$ORIG_SHA" ] || die "the original PARAM is NOT back (tablet $got)"
+    say "the original PARAM is back: the next boot is BOOT's"
+}
+
+case "${1:-}" in
+    status) cmd_status ;;
+    rootfs) [ $# -ge 3 ] || die "rootfs NAME IMAGE [--replace]"; cmd_rootfs "$2" "$3" "${4:-}" ;;
+    modules) [ $# -eq 3 ] || die "modules NAME TARBALL"; cmd_modules "$2" "$3" ;;
+    kernel) [ $# -eq 3 ] || die "kernel IMAGE DTB"; cmd_kernel "$2" "$3" ;;
+    loader) [ $# -eq 2 ] || die "loader PARAM_IMAGE"; cmd_loader "$2" ;;
+    unloader) cmd_unloader "${2:-}" ;;
+    *) sed -n '/^# t715-arm64-install:/,/^# tar (numeric/p' "$0"; exit 2 ;;
+esac

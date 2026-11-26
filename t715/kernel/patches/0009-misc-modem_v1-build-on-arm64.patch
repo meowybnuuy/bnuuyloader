@@ -1,0 +1,60 @@
+From 96a2510ad4862c42766ce73d108688f8a8714c2e Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 12:00:00 +0000
+Subject: [PATCH] misc: modem_v1: build on arm64
+
+The driver has no 32-bit-only code: the shared-memory structures use
+u16/u32 fields, the ring copies go through memcpy_toio/memcpy_fromio, and
+the loader's ioctls take an int.  Two compile-time guards kept it to ARM:
+the Kconfig dependency, and a static_assert that sizeof(size_t) is 4,
+which held the SIPC5 padding to the stock kernel's word size.  The padding
+stays 4 (the CP BOOT rounds its ring pointer up to 4); the assert goes.
+
+The host ring vectors (tools/testing/modem_v1) pass on a 64-bit host:
+76 tests, 0 failed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/modem_v1/Kconfig         |  2 +-
+ drivers/misc/modem_v1/include/sipc5.h | 10 +++++-----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/misc/modem_v1/Kconfig b/drivers/misc/modem_v1/Kconfig
+index a46f6c090..30c36a075 100644
+--- a/drivers/misc/modem_v1/Kconfig
++++ b/drivers/misc/modem_v1/Kconfig
+@@ -7,7 +7,7 @@
+ 
+ config SEC_MODEM_V1
+ 	tristate "Samsung SS333 modem interface (SIPC5 over MIPI-LLI, SPI boot)"
+-	depends on ARM
++	depends on ARM || ARM64
+ 	depends on MIPI_LLI && SPI && OF && GPIOLIB && NET
+ 	select CRC32
+ 	help
+diff --git a/drivers/misc/modem_v1/include/sipc5.h b/drivers/misc/modem_v1/include/sipc5.h
+index ee378b5de..41f8ab7e1 100644
+--- a/drivers/misc/modem_v1/include/sipc5.h
++++ b/drivers/misc/modem_v1/include/sipc5.h
+@@ -93,13 +93,13 @@ static inline u8 sipc5_get_ctrl(u8 *frm)
+ 
+ /*
+  * 6.12 port: frames are padded to SIPC5_ALIGN bytes.  The 3.10 code used
+- * sizeof(size_t), which is 4 on the stock ARM32 kernel and on this one; the
+- * CP BOOT advances its ring pointer by round-up-4, so the value is pinned
+- * (research/modem/research/SYNTHESIS.md section 2.8, RI C8).
++ * sizeof(size_t), which is 4 on the stock ARM32 kernel; the CP BOOT
++ * advances its ring pointer by round-up-4, so the value is pinned to 4
++ * (research/modem/research/SYNTHESIS.md section 2.8, RI C8), whatever
++ * size_t is: 8 bytes on arm64.  No other part of the wire format depends
++ * on the word size (the shared-memory structures use u16/u32 fields).
+  */
+ #define SIPC5_ALIGN	4
+-static_assert(sizeof(size_t) == SIPC5_ALIGN,
+-	      "SIPC5 padding must stay 4 bytes (stock ARM32 sizeof(size_t))");
+ 
+ static inline unsigned int sipc5_calc_padding_size(unsigned int len)
+ {
+-- 
+2.52.0
+

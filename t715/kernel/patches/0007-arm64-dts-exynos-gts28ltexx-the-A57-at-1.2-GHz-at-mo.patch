@@ -1,0 +1,121 @@
+From 72abae72b04339bb12b0ff0a3bbb42cbde1c6689 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH 7/7] arm64: dts: exynos: gts28ltexx: the A57 at 1.2 GHz at
+ most (stage 1)
+
+Stage 1 of the project's CPU frequency plan on the 64-bit kernel: the A57
+levels above 1.2 GHz are deleted from the board's table until stage 2 has
+run on arm64 (the 32-bit daily kernel validated 1.5 GHz on 2026-11-07),
+BUCK2 is capped at the 1.2 GHz OPP's 1.0625 V, and the A57 cooling states
+of the board's maps are renumbered for the 5-level table (0.9 GHz is
+state 3, 0.8 GHz state 4); the 81 C map that took the A57 down to 1.2 GHz
+has nothing left to do and goes. Trips unchanged (81/95/100 C, 81/86 C).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos/exynos5433-gts28ltexx-stage1.dtsi  | 82 +++++++++++++++++++
+ .../boot/dts/exynos/exynos5433-gts28ltexx.dts |  1 +
+ 2 files changed, 83 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-stage1.dtsi
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-stage1.dtsi b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-stage1.dtsi
+new file mode 100644
+index 000000000..a2bcfb767
+--- /dev/null
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-stage1.dtsi
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): the A57 at 1.2 GHz at most on the 64-bit kernel.
++ *
++ * Stage 1 of the 32-bit port's CPU frequency plan (docs/hardware/CPUFREQ.md of the
++ * project): both clusters scale at or below 1.2 GHz, with CPU cooling.  The 32-bit
++ * daily kernel goes on to stage 2b (A57 up to 1.5 GHz), validated there on
++ * 2026-11-07; on the 64-bit kernel stage 2 has not run yet, so the levels above
++ * 1.2 GHz are deleted from the A57 table: no governor can choose them.  The plan's
++ * own rule: the table lives in the device tree, so that no OPP above the cap
++ * exists at all.
++ *
++ * Two consequences, both handled here:
++ *  - BUCK2 (vdd_eagle) never needs more than the 1.2 GHz OPP's 1.0625 V: its
++ *    maximum is set to that, so that a wrong table could not raise the rail
++ *    (CPUFREQ.md 2.3, "test boards should set regulator-max-microvolt to the
++ *    highest OPP of the stage").
++ *  - The A57 cooling states of the board's maps are numbered for the 8-level
++ *    table (1.5 GHz = state 0 ... 800 MHz = state 7).  With 5 levels (1200,
++ *    1100, 1000, 900, 800 MHz = states 0 to 4) the maps are renumbered to the
++ *    same frequencies: 0.9 GHz is state 3, 0.8 GHz state 4.  A map whose upper
++ *    state is above the device's maximum would not bind at all.  The 81 C
++ *    "down to 1.2 GHz" map of the A57 sensors has nothing left to do and goes.
++ *    The trips themselves, and the A53 and GPU maps, are unchanged (the owner's
++ *    choice of 2026-11-24: the 32-bit daily's 81/95/100 C and 81/86 C).
++ */
++
++&cluster_a57_t715_opp_table {
++	/delete-node/ opp-1300000000;
++	/delete-node/ opp-1400000000;
++	/delete-node/ opp-1500000000;
++};
++
++&buck2_reg {
++	regulator-max-microvolt = <1062500>;
++};
++
++&atlas0_thermal {
++	cooling-maps {
++		/delete-node/ map-a57-1200;
++
++		map-a57-900 {
++			cooling-device = <&cpu4 0 3>, <&cpu5 0 3>,
++					 <&cpu6 0 3>, <&cpu7 0 3>;
++		};
++
++		map-a57-min {
++			cooling-device = <&cpu4 3 4>, <&cpu5 3 4>,
++					 <&cpu6 3 4>, <&cpu7 3 4>;
++		};
++	};
++};
++
++&atlas1_thermal {
++	cooling-maps {
++		/delete-node/ map-a57-1200;
++
++		map-a57-900 {
++			cooling-device = <&cpu4 0 3>, <&cpu5 0 3>,
++					 <&cpu6 0 3>, <&cpu7 0 3>;
++		};
++
++		map-a57-min {
++			cooling-device = <&cpu4 3 4>, <&cpu5 3 4>,
++					 <&cpu6 3 4>, <&cpu7 3 4>;
++		};
++	};
++};
++
++&apollo_thermal {
++	cooling-maps {
++		map-a57-900 {
++			cooling-device = <&cpu4 0 3>, <&cpu5 0 3>,
++					 <&cpu6 0 3>, <&cpu7 0 3>;
++		};
++
++		map-a57-min {
++			cooling-device = <&cpu4 3 4>, <&cpu5 3 4>,
++					 <&cpu6 3 4>, <&cpu7 3 4>;
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+index a36cc0108..fd2922880 100644
+--- a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+@@ -10,3 +10,4 @@
+ /dts-v1/;
+ #include <arm/samsung/exynos5433-gts28ltexx.dts>
+ #include "exynos5433-gts28ltexx-smp.dtsi"
++#include "exynos5433-gts28ltexx-stage1.dtsi"
+-- 
+2.52.0
+

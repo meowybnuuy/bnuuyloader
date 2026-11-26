@@ -46,7 +46,8 @@ def compile_a64(output: Path) -> tuple[bytes, bytes]:
         f"--defsym=A64_ENTRY_OFFSET={A64_ENTRY_OFFSET:#x}",
         f"--defsym=MAIN_ENTRY_OFFSET={MAIN_ENTRY_OFFSET:#x}",
     ]
-    subprocess.run(["ld.lld.exe", "-m", "aarch64elf", "-T",
+    # "ld.lld" on every system: Windows finds ld.lld.exe under that name itself.
+    subprocess.run(["ld.lld", "-m", "aarch64elf", "-T",
                     str(ROOT / "src/a64.ld"), *layout_symbols, "-o", str(elf),
                     *map(str, objects)], check=True)
     return (extract_binary(elf, output / "a64_entry.bin", ".entry"),

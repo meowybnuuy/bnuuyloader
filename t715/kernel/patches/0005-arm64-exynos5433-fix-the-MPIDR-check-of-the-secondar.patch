@@ -1,0 +1,49 @@
+From c80b7799fcf9f59675664da2ab99e44c78eb8107 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH 5/7] arm64: exynos5433: fix the MPIDR check of the secondary
+ CPUs
+
+exynos5433_cpu_init() refused any MPIDR with mpidr >> (MPIDR_LEVEL_BITS_SHIFT * 2)
+non-zero. MPIDR_LEVEL_BITS_SHIFT is 3, the log2 of the 8 bits of an affinity
+level, so this shifted by 6, not 16: 0x101 >> 6 = 4, and every A53 secondary
+(Aff1 = 1) was refused while the A57 (Aff1 = 0) passed. Check affinity levels
+2 and 3 instead.
+
+The same slip made exynos5433_show_core() print a wrong MPIDR
+(<< MPIDR_LEVEL_BITS_SHIFT for << MPIDR_LEVEL_BITS).
+
+Seen on the SM-T715 on 2026-11-24 (test smpk2: "CPU1: unexpected MPIDR
+0x101", only CPU0 and CPU4 online); with the fix all eight CPUs come up
+(smpk3, smpk4).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/kernel/smp_exynos5433.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kernel/smp_exynos5433.c b/arch/arm64/kernel/smp_exynos5433.c
+index 19fce5018..434f9e9b4 100644
+--- a/arch/arm64/kernel/smp_exynos5433.c
++++ b/arch/arm64/kernel/smp_exynos5433.c
+@@ -130,7 +130,7 @@ static void exynos5433_show_core(const char *when, unsigned int idx)
+ {
+ 	pr_info("EXYNOS5433: %s: PMU core %u (MPIDR 0x%03x): CONF 0x%08x STATUS 0x%08x OPTION 0x%08x DUR0-3 0x%08x 0x%08x 0x%08x 0x%08x\n",
+ 		when, idx,
+-		((idx / EXYNOS5433_CORES_PER_CLUSTER) << MPIDR_LEVEL_BITS_SHIFT) |
++		((idx / EXYNOS5433_CORES_PER_CLUSTER) << MPIDR_LEVEL_BITS) |
+ 		(idx % EXYNOS5433_CORES_PER_CLUSTER),
+ 		exynos5433_pmu_read(EXYNOS_ARM_CORE_CONFIGURATION(idx)),
+ 		exynos5433_pmu_read(EXYNOS_ARM_CORE_STATUS(idx)),
+@@ -285,7 +285,7 @@ static int exynos5433_cpu_init(unsigned int cpu)
+ 
+ 	if (MPIDR_AFFINITY_LEVEL(mpidr, 0) >= EXYNOS5433_CORES_PER_CLUSTER ||
+ 	    MPIDR_AFFINITY_LEVEL(mpidr, 1) >= EXYNOS5433_NR_CLUSTERS ||
+-	    mpidr >> (MPIDR_LEVEL_BITS_SHIFT * 2)) {
++	    MPIDR_AFFINITY_LEVEL(mpidr, 2) || MPIDR_AFFINITY_LEVEL(mpidr, 3)) {
+ 		pr_err("EXYNOS5433: CPU%u: unexpected MPIDR 0x%0llx\n", cpu, mpidr);
+ 		return -EINVAL;
+ 	}
+-- 
+2.52.0
+

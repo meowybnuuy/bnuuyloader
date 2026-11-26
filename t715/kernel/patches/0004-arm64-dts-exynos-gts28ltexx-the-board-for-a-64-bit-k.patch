@@ -1,0 +1,112 @@
+From 26a9b847d19e4d7a3124ae5b2662bfbea68adc90 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH 4/7] arm64: dts: exynos: gts28ltexx: the board for a 64-bit
+ kernel
+
+The Galaxy Tab S2 8.0 (SM-T715) is described once, for both kernels, by
+the 32-bit board file (arch/arm/boot/dts/samsung/): the register map and
+the interrupts are the same in AArch64.  That file deletes the
+enable-method of every CPU, since a 32-bit kernel takes its SMP
+operations from the machine and the properties said "psci", which the
+signed bootloader of this device does not offer.
+
+A 64-bit kernel has no machine operations: it starts a secondary CPU by
+the enable-method of its node.  This board file includes the 32-bit one
+and adds, through a dtsi, the enable-method that starts the CPUs without
+PSCI ("samsung,exynos5433-el2"): three other Cortex-A53, then the four
+Cortex-A57.  Everything that method needs is already in the board file:
+the PMU (samsung,exynos5433-pmu) and the monitor's boot window
+(smp-sram@207b000).  The psci node stays deleted.
+
+The kernel asks for the enable-method on every CPU node, the boot CPU's
+included (cpu@100, the Cortex-A53 the bootloader starts).
+
+The board file is built only with CONFIG_ARCH_EXYNOS.  With "nosmp", or
+in a kernel without CONFIG_ARM64_EXYNOS5433_SMP, the property changes
+nothing: such a kernel logs that it does not know the method and runs
+with one CPU.
+
+Not run on the device: the dtb was built, and decompiled to check the
+eight properties.
+---
+ arch/arm64/boot/dts/exynos/Makefile           |  1 +
+ .../dts/exynos/exynos5433-gts28ltexx-smp.dtsi | 34 +++++++++++++++++++
+ .../boot/dts/exynos/exynos5433-gts28ltexx.dts | 12 +++++++
+ 3 files changed, 47 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-smp.dtsi
+ create mode 100644 arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+
+diff --git a/arch/arm64/boot/dts/exynos/Makefile b/arch/arm64/boot/dts/exynos/Makefile
+index d7f2191c2..4232c4241 100644
+--- a/arch/arm64/boot/dts/exynos/Makefile
++++ b/arch/arm64/boot/dts/exynos/Makefile
+@@ -4,6 +4,7 @@ subdir-y += google
+ dtb-$(CONFIG_ARCH_EXYNOS) += \
+ 	exynos5433-tm2.dtb		\
+ 	exynos5433-tm2e.dtb		\
++	exynos5433-gts28ltexx.dtb	\
+ 	exynos7-espresso.dtb		\
+ 	exynos7885-jackpotlte.dtb	\
+ 	exynos850-e850-96.dtb		\
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-smp.dtsi b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-smp.dtsi
+new file mode 100644
+index 000000000..290cebb55
+--- /dev/null
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-smp.dtsi
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): the secondary CPUs of a 64-bit
++ * kernel.
++ *
++ * The 32-bit board file deletes the enable-method of every CPU: a 32-bit
++ * kernel takes its SMP operations from the machine, and the properties
++ * said "psci", which this device's signed bootloader does not offer (the
++ * psci node is deleted there too, and stays so).  A 64-bit kernel has no
++ * machine operations: it starts a secondary CPU by the enable-method of
++ * its node, and needs one for this device.
++ *
++ * "samsung,exynos5433-el2" is the start sequence of the vendor's 32-bit
++ * kernel, with the switch to AArch64 that ends it: the PMU powers the core
++ * on and the secure monitor releases it in AArch32 at the address found in
++ * its boot register, then an SMC of the core itself takes it to AArch64 at
++ * EL2 (CONFIG_ARM64_EXYNOS5433_SMP, arch/arm64/kernel/smp_exynos5433.c).
++ *
++ * Everything that sequence needs is already in the board file: the PMU
++ * (samsung,exynos5433-pmu, exynos5433.dtsi) and the monitor's boot window
++ * (smp-sram@207b000, samsung,exynos4210-sysram-ns).
++ *
++ * cpu@100 is the CPU the bootloader starts (a Cortex-A53); the method is
++ * written on it too, as the CPU binding requires it of every CPU node.
++ */
++
++&cpu0 { enable-method = "samsung,exynos5433-el2"; };
++&cpu1 { enable-method = "samsung,exynos5433-el2"; };
++&cpu2 { enable-method = "samsung,exynos5433-el2"; };
++&cpu3 { enable-method = "samsung,exynos5433-el2"; };
++&cpu4 { enable-method = "samsung,exynos5433-el2"; };
++&cpu5 { enable-method = "samsung,exynos5433-el2"; };
++&cpu6 { enable-method = "samsung,exynos5433-el2"; };
++&cpu7 { enable-method = "samsung,exynos5433-el2"; };
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+new file mode 100644
+index 000000000..a36cc0108
+--- /dev/null
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433, for a 64-bit kernel.
++ *
++ * The board is described once, for both kernels, by the 32-bit board file
++ * (arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts): the register map
++ * and the interrupts are the same in AArch64.  A 64-bit kernel needs one
++ * thing more from the tree, the way to start its secondary CPUs.
++ */
++/dts-v1/;
++#include <arm/samsung/exynos5433-gts28ltexx.dts>
++#include "exynos5433-gts28ltexx-smp.dtsi"
+-- 
+2.52.0
+

@@ -1,0 +1,112 @@
+From 512804d4958166048e65a6b1c2a6f45ba57381ab Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH] arm64: exynos5433: MCT without the architected timer
+
+On the Galaxy Tab S2 8.0 LTE (SM-T715, Exynos 5433) the bootloader
+leaves the ARM system counter stopped: CNTFRQ_EL0 reads 0 and
+CNTPCT_EL0 never moves, on the path that starts the kernel in AArch64
+(S-Boot -> AArch64 at EL2 -> EL1).  arm64 Linux is built around that
+counter, so with the stock code the kernel cannot start:
+
+  - time_init() panics with "Unable to initialise architected timer."
+    as soon as arch_timer_get_rate() returns 0;
+  - __delay() measures the counter, so a delay would either return at
+    once or never end, because the counter does not advance.
+
+The Exynos MCT runs, as it does for the 32-bit port of the same board,
+and its driver registers the clock source, the clock events and
+sched_clock: jiffies and hrtimers already keep time through it.
+
+This change lets the kernel rely on it alone:
+
+  - arch/arm64/kernel/time.c: on "samsung,exynos5433" only, and only
+    when the architected timer has no rate, skip the panic and leave
+    lpj_fine at 0.  calibrate_delay() then measures loops_per_jiffy on
+    the jiffies the MCT drives.  Every other machine keeps the panic.
+  - arch/arm64/lib/delay.c: while the architected timer has no rate,
+    __delay() counts iterations of a loop instead of reading the
+    counter.  That is the quantity loops_per_jiffy is calibrated on.
+
+arch_timer_get_rate() is also 0 before time_init(), so the earliest
+delays take the counting path too, scaled by the initial
+loops_per_jiffy.
+
+Proven on the tablet on 2026-11-24 (three boots of a minimal arm64
+kernel with this change, the userland test reached).
+---
+ arch/arm64/kernel/time.c | 19 +++++++++++++++----
+ arch/arm64/lib/delay.c   | 19 ++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/kernel/time.c b/arch/arm64/kernel/time.c
+index b5855eb74..a4e3d556a 100644
+--- a/arch/arm64/kernel/time.c
++++ b/arch/arm64/kernel/time.c
+@@ -25,6 +25,7 @@
+ #include <linux/delay.h>
+ #include <linux/clocksource.h>
+ #include <linux/of_clk.h>
++#include <linux/of.h>
+ #include <linux/acpi.h>
+ 
+ #include <clocksource/arm_arch_timer.h>
+@@ -62,11 +63,21 @@ void __init time_init(void)
+ 	tick_setup_hrtimer_broadcast();
+ 
+ 	arch_timer_rate = arch_timer_get_rate();
+-	if (!arch_timer_rate)
+-		panic("Unable to initialise architected timer.\n");
++	if (!arch_timer_rate && of_machine_is_compatible("samsung,exynos5433")) {
++		/*
++		 * Exynos 5433: its bootloader leaves the system counter stopped
++		 * (CNTFRQ_EL0 reads 0 and CNTPCT_EL0 never moves at EL2), so there is no
++		 * architected timer.  The Exynos MCT keeps time, as it does for ARM32; the
++		 * delay loop is calibrated on the jiffies (arch/arm64/lib/delay.c).
++		 */
++		pr_info("architected timer absent: the system counter does not run; the MCT keeps time\n");
++	} else {
++		if (!arch_timer_rate)
++			panic("Unable to initialise architected timer.\n");
+ 
+-	/* Calibrate the delay loop directly */
+-	lpj_fine = arch_timer_rate / HZ;
++		/* Calibrate the delay loop directly */
++		lpj_fine = arch_timer_rate / HZ;
++	}
+ 
+ 	pv_time_init();
+ }
+diff --git a/arch/arm64/lib/delay.c b/arch/arm64/lib/delay.c
+index e278e060e..314a91b1f 100644
+--- a/arch/arm64/lib/delay.c
++++ b/arch/arm64/lib/delay.c
+@@ -40,7 +40,24 @@ static cycles_t notrace __delay_cycles(void)
+ 
+ void __delay(unsigned long cycles)
+ {
+-	cycles_t start = __delay_cycles();
++	cycles_t start;
++
++	/*
++	 * No architected timer came up (Exynos 5433: its bootloader leaves the system
++	 * counter stopped, and the Exynos MCT keeps time, see time_init()).  CNTVCT would
++	 * never advance, so count iterations of this loop: it is what loops_per_jiffy was
++	 * calibrated on.
++	 */
++	if (!arch_timer_get_rate()) {
++		asm volatile(
++		"1:	subs	%0, %0, #1\n"
++		"	b.hi	1b"
++		: "=r" (cycles)
++		: "0" (cycles));
++		return;
++	}
++
++	start = __delay_cycles();
+ 
+ 	if (alternative_has_cap_unlikely(ARM64_HAS_WFXT)) {
+ 		u64 end = start + cycles;
+-- 
+2.52.0
+

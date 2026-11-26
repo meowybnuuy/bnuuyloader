@@ -1,0 +1,49 @@
+From 2a53d7c2d65626f3f8201907433a86c9834e12b7 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH 6/7] arm64: topology: no warning without an architected timer
+ frequency
+
+freq_inv_set_max_ratio() takes the architected timer's frequency as the
+reference of the activity monitors' frequency invariance, and warns when
+it reads 0. On the SM-T715 (Exynos5433) started at EL2 by its own loader
+the generic counter does not run and CNTFRQ reads 0; the kernel keeps
+time on the MCT. The first cpufreq policy then printed
+"WARNING: CPU: 2 PID: 55 at arch/arm64/kernel/topology.c:125" (test
+cpuf1, 2026-11-24). These Cortex-A53 and A57 have no AMU, so nothing is
+lost: return quietly when the reference is 0, and keep the warning for a
+maximum frequency of 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/kernel/topology.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kernel/topology.c b/arch/arm64/kernel/topology.c
+index 052e9b994..6cc986840 100644
+--- a/arch/arm64/kernel/topology.c
++++ b/arch/arm64/kernel/topology.c
+@@ -121,7 +121,19 @@ void freq_inv_set_max_ratio(int cpu, u64 max_rate)
+ {
+ 	u64 ratio, ref_rate = arch_timer_get_rate();
+ 
+-	if (unlikely(!max_rate || !ref_rate)) {
++	/*
++	 * No architected timer frequency (CNTFRQ reads 0, as on an Exynos5433
++	 * started at EL2 by the SM-T715's own loader, where the kernel keeps
++	 * time on the MCT): there is no reference for the activity monitors'
++	 * invariance, and these cores have no AMU to need one.  cpufreq's own
++	 * frequency invariance still applies.
++	 */
++	if (!ref_rate) {
++		pr_debug("CPU%d: no architected timer frequency: no AMU frequency invariance\n", cpu);
++		return;
++	}
++
++	if (unlikely(!max_rate)) {
+ 		WARN_ONCE(1, "CPU%d: invalid maximum or reference frequency.\n",
+ 			 cpu);
+ 		return;
+-- 
+2.52.0
+

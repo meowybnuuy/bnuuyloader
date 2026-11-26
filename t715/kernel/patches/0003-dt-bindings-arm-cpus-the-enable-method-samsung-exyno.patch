@@ -1,0 +1,93 @@
+From e603005891b1887cc64d1fbde82fcf01ab66b2f2 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/7] dt-bindings: arm: cpus: the enable-method
+ "samsung,exynos5433-el2"
+
+The way the Exynos 5433 of the Galaxy Tab S2 8.0 (SM-T715) starts its
+secondary CPUs when no PSCI is to be had, for a 64-bit kernel: the
+vendor's 32-bit start sequence, ended by a switch to AArch64 that the
+core makes itself (SMC 0x82000400, AArch64 at EL2).
+
+The property is one of the strings cpus.yaml allows for a 64-bit CPU
+node, and the method is described next to the three others of its kind,
+in the same form.
+
+A separate patch from the board file that uses it, as the rule for
+bindings asks.
+---
+ .../cpu-enable-method/samsung,exynos5433-el2  | 49 +++++++++++++++++++
+ .../devicetree/bindings/arm/cpus.yaml         |  1 +
+ 2 files changed, 50 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/arm/cpu-enable-method/samsung,exynos5433-el2
+
+diff --git a/Documentation/devicetree/bindings/arm/cpu-enable-method/samsung,exynos5433-el2 b/Documentation/devicetree/bindings/arm/cpu-enable-method/samsung,exynos5433-el2
+new file mode 100644
+index 000000000..02566ec9a
+--- /dev/null
++++ b/Documentation/devicetree/bindings/arm/cpu-enable-method/samsung,exynos5433-el2
+@@ -0,0 +1,49 @@
++=========================================================
++Secondary CPU enable-method "samsung,exynos5433-el2" binding
++=========================================================
++
++This document describes the "samsung,exynos5433-el2" method for enabling
++secondary CPUs of an ARM 64-bit kernel on a device whose bootloader offers
++no PSCI.
++
++Enable method name:	"samsung,exynos5433-el2"
++Compatible machines:	"samsung,exynos5433"
++Compatible CPUs:	"arm,cortex-a53", "arm,cortex-a57"
++Related properties:	(none)
++
++Note:
++This enable method needs a valid node compatible with
++"samsung,exynos5433-pmu"[1] and one compatible with
++"samsung,exynos4210-sysram-ns"[2] at the secure monitor's non-secure sysram
++(0x0207b000 on this SoC): the kernel puts the entry address of a secondary
++CPU at offset 0x1c of that window. It is implemented by
++CONFIG_ARM64_EXYNOS5433_SMP.
++
++The bootloader starts a secondary CPU in AArch32 at that address, and the
++CPU switches itself to AArch64 at EL2 with the monitor call SMC 0x82000400
++before it enters the kernel.
++
++Example:
++
++	cpus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		cpu@100 {
++			compatible = "arm,cortex-a53";
++			device_type = "cpu";
++			enable-method = "samsung,exynos5433-el2";
++			reg = <0x100>;
++		};
++
++		cpu@101 {
++			compatible = "arm,cortex-a53";
++			device_type = "cpu";
++			enable-method = "samsung,exynos5433-el2";
++			reg = <0x101>;
++		};
++	};
++
++--
++[1] soc/samsung/exynos-pmu.yaml
++[2] sram/sram.yaml
+diff --git a/Documentation/devicetree/bindings/arm/cpus.yaml b/Documentation/devicetree/bindings/arm/cpus.yaml
+index f308ff6c3..2444c2d63 100644
+--- a/Documentation/devicetree/bindings/arm/cpus.yaml
++++ b/Documentation/devicetree/bindings/arm/cpus.yaml
+@@ -213,6 +213,7 @@ properties:
+       # On ARM v8 64-bit this property is required
+       - enum:
+           - psci
++          - samsung,exynos5433-el2
+           - spin-table
+       # On ARM 32-bit systems this property is optional
+       - enum:
+-- 
+2.52.0
+

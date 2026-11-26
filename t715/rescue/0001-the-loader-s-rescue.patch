@@ -1,0 +1,938 @@
+diff --git a/boot/README.md b/boot/README.md
+index d1d81fa..0edd7eb 100644
+--- a/boot/README.md
++++ b/boot/README.md
+@@ -3,7 +3,7 @@
+ | Path | What |
+ |---|---|
+ | `initramfs/init` | the initramfs's `/init` (busybox sh, PID 1): image mode, persistent root, knobs, debug shell |
+-| `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs), reproducibly, in Docker |
++| `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs; with `--paramrescue`, the loader the rescue puts back), reproducibly, in Docker |
+ | `pack-test-recovery.sh` | packs kernel, DTB and initramfs into a RECOVERY image, or a BOOT image with `--boot` |
+ | `samsung_bootimg.py` | Samsung boot image and DTBH reader/writer |
+ | `cpio_newc.py`, `zimage_extract.py`, `seclog_decode.py` | cpio writer, zImage/ikconfig extractor, sboot `sec_log` decoder |
+@@ -74,6 +74,7 @@ file can look stale. The initramfs logs a warning in that case.
+ | `t715.persist=NAME` | (none) | persistent root `USERDATA/NAME` (wins over `rootfs.select`'s line 2) |
+ | `t715.persist=0` | | image mode even if `rootfs.select` asks for a persistent root (rescue boot) |
+ | `t715.quiet=1` | `0` | a quiet screen until the Plymouth splash: console loglevel 3 from the initramfs on (`CONFIG_CMDLINE`'s `loglevel=8` comes after anything sboot or a boot image header could add; sboot drops the header's command line anyway), the VT cleared and its cursor hidden |
++| `t715.paramrescue=1` | `0` | a tablet whose only system is started by a loader in PARAM: unless PARAM holds the stock image or the loader known to work (`/lib/t715-paramrescue`, from `--paramrescue`), write that loader back and restart (see "The loader's rescue" below) |
+ | `t715.wdtguard=0` | `1` | boot even when the previous reset was the watchdog (default: restart to Android at once) |
+ | `t715.crashlog=1` | `0` | **test images only**: after a watchdog reset, just before the guard's restart, save the previous boot's pstore records (its console, a panic dump) to `media/0/linux/t715-crash/` on USERDATA, without the kernel command line, init's environment and MAC addresses; USERDATA gets `e2fsck -p` and a read-write mount for that copy only. Without it the guard's own short boot overwrites the console of the boot that hung |
+ | `t715.returnafter=SECS` | `0` | unattended boot: SECS seconds after the hand-over, restart to Android through sysrq `b` (PMU SWRESET) and forward the journal to the kernel log |
+@@ -182,6 +183,81 @@ it back; telnetd then listens on 172.16.42.1:23 only, and the shell has
+ no password. macOS has no built-in RNDIS driver. If no interface appears,
+ rebuild with `--knobs "t715.usbfn=ecm"` (CDC-ECM is native on macOS).
+ 
++### The loader's rescue (`t715.paramrescue`)
++
++For a tablet that keeps no 32-bit system: S-Boot starts the arm64 kernel
++through a loader placed in PARAM ([bnuuyloader](https://github.com/meowybnuuy/bnuuyloader)),
++and boots BOOT only when that loader hands the boot back (the arm64 system
++did not come up) or when no loader runs at all. A loader that fails to fire
++is never reached again, and with nothing behind BOOT the tablet restarts in
++a loop that nothing can reach.
++
++With the knob on, `/init` looks at PARAM first, once the USB debug link is up:
++
++| The loader's part of PARAM holds | What happens |
++|---|---|
++| the loader known to work | nothing: the boot goes on |
++| the stock image (no loader) | nothing: the boot goes on |
++| anything else | the known loader is written over it, read back, and the board restarts: the arm64 system comes back by itself |
++
++The boot then goes on to the root image, and as there is none, to the
++failure path: the reason on screen, the debug link (and with
++`t715.telnet=1` its root shell) for `t715.failwait` seconds, then a restart.
++PARAM flagged read-only (as the system of every day leaves it, by a rule of
++its own) is made writable first; a disk that cannot be written is not forced.
++With the knob off, a file of the directory missing, an image that is not the
++one its sha256 announces, no single partition named PARAM, or a write that
++does not read back, nothing is written and the boot goes on the same way.
++
++`--paramrescue-also IMAGE` (more than once) names other PARAM images whose
++loaders work: the rescue leaves them alone too and never writes them, so
++the loader the owner put in PARAM is respected.
++
++**Only the loader's part of PARAM is compared and written.** The loader is
++the start of PARAM, the archive S-Boot reads its logo from; what follows is
++data of S-Boot's own, and S-Boot writes it whenever it boots a kernel itself
++(a fallback boot, included): on 2026-11-25 the first rescue took a good loader
++for none, twice, because of it. `--paramrescue-extent BYTES` keeps the rescue
++to the first BYTES; without it, the whole image is the loader.
++
++The files come from the build; the option turns the knob on by default:
++
++```bash
++bash boot/build-initramfs.sh --out out/initramfs-rescue \
++     --knobs "t715.usbfn=ecm t715.telnet=1 t715.failwait=120 t715.quiet=1" \
++     --paramrescue LOADER.param --paramrescue-extent LOADER_BYTES --paramrescue-stock SHA256_OF_THE_STOCK_PARAM \
++     [--paramrescue-also OTHER_LOADER.param ...]
++bash boot/tests/test_initramfs.sh       # builds its own images, never touches the tablet
++bash boot/pack-test-recovery.sh --initramfs out/initramfs-rescue/initramfs.cpio.gz \
++     --out out/rescue/recovery BUILD_DIR      # RECOVERY image
++bash boot/pack-test-recovery.sh --initramfs out/initramfs-rescue/initramfs.cpio.gz \
++     --boot --out out/rescue/boot BUILD_DIR   # the same for BOOT
++```
++
++Both sha256 are of the loader's part (`head -c LOADER_BYTES IMAGE | sha256sum`).
++
++Rules:
++
++- **Such an image is one tablet's own PARAM with a loader in it: never publish it.**
++  The stock PARAM's sha256 is required: without it the rescue would take the
++  stock image for a loader that did not run.
++- **The known loaders must follow the loaders in use.** BOOT is booted also
++  when a working loader hands the boot back, and the rescue then replaces a
++  loader it knows of neither way (a newer one, with a failure of the arm64
++  system behind it) by the one it writes back. Rebuild the image with each
++  new loader: the last proven one as `--paramrescue`, the others as
++  `--paramrescue-also`.
++- **BOOT first, while the loader works.** S-Boot never boots BOOT then, so a
++  broken image costs nothing. To see the rescue for real, make one boot that
++  the ledger will not count as up (`systemctl disable t715-kboot-mark.service`,
++  restart, `systemctl enable` it, restart): the loader hands the next two
++  boots to the rescue. RECOVERY after: it cannot be tried by keys while the
++  loader is in PARAM, the loader running in every S-Boot boot, a recovery
++  one included.
++- The system of every day's tools that name PARAM by the sha256 of the whole
++  partition find no name for it after a fallback boot, since S-Boot's data
++  has changed: they must look at the loader's part, as the rescue does.
++
+ ### On-screen messages
+ 
+ `t715.quiet=1` keeps the screen black until the splash, which also hid
+diff --git a/boot/build-initramfs.sh b/boot/build-initramfs.sh
+index 12a989d..0265055 100755
+--- a/boot/build-initramfs.sh
++++ b/boot/build-initramfs.sh
+@@ -27,10 +27,23 @@
+ #                          kernel build (modules.dep, aliases), which /init
+ #                          copies into the root's tmpfs layer so that udev
+ #                          loads Bluetooth, Wi-Fi... (the image has none)
++#   /lib/t715-paramrescue/ only with --paramrescue: the part of a PARAM image
++#                          that is a loader known to work (param.img.gz,
++#                          gzipped), two sha256 (loader.sha256, stock.sha256)
++#                          and its length (extent); with --paramrescue-also,
++#                          also.sha256, the sha256 of loaders only left
++#                          alone.  /init then puts the first loader back in
++#                          PARAM when that part of PARAM holds none of them
++#                          (t715.paramrescue, on by default with the option).
++#                          A tablet's own PARAM is never published: keep
++#                          such a build private.
+ #   empty dirs             proc sys run tmp newroot userdata ...
+ #
+ # Usage: bash boot/build-initramfs.sh [--out DIR] [--knobs "t715.shell=1 ..."]
+ #                                        [--modules BUILD/modules.tar.xz]
++#                                        [--paramrescue PARAM_IMG --paramrescue-stock SHA256
++#                                         [--paramrescue-extent BYTES]
++#                                         [--paramrescue-also PARAM_IMG ...]]
+ #
+ # Everything runs in Docker (native arm64 Debian trixie, pinned by digest):
+ # hash-checked download, `file`/`readelf` checks, applet list, cpio
+@@ -45,6 +58,10 @@ INIT_SRC="$ROOT/boot/initramfs/init"
+ CPIO_PY="$ROOT/boot/cpio_newc.py"
+ KNOBS=""
+ MODULES_TAR=""
++PARAMRESCUE=""
++PARAMRESCUE_STOCK=""
++PARAMRESCUE_EXTENT=""
++PARAMRESCUE_ALSO=()
+ 
+ # Debian trixie image index (multi-arch), pinned; used as linux/arm64.
+ BASE_IMAGE="debian@sha256:8c4733a92aacd0bcff3779eadc35a4a5147f36cb20a5fcb56504cbc740212259"
+@@ -64,7 +81,7 @@ FSCK_URLS=(
+   "http://snapshot.debian.org/archive/debian/20261020T000000Z/pool/main/e/e2fsprogs/e2fsck-static_1.47.2-3%2Bb12_armhf.deb"
+ )
+ 
+-usage() { sed -n '2,33p' "$0"; }
++usage() { sed -n '2,43p' "$0"; }
+ die() { echo "error: $*" >&2; exit 1; }
+ 
+ while [[ $# -gt 0 ]]; do
+@@ -73,6 +90,14 @@ while [[ $# -gt 0 ]]; do
+     --out=*) OUT="${1#--out=}"; shift ;;
+     --knobs) [[ $# -ge 2 ]] || die "--knobs needs a value"; KNOBS="$2"; shift 2 ;;
+     --modules) [[ $# -ge 2 ]] || die "--modules needs a value"; MODULES_TAR="$2"; shift 2 ;;
++    --paramrescue) [[ $# -ge 2 ]] || die "--paramrescue needs a value"; PARAMRESCUE="$2"; shift 2 ;;
++    --paramrescue=*) PARAMRESCUE="${1#--paramrescue=}"; shift ;;
++    --paramrescue-stock) [[ $# -ge 2 ]] || die "--paramrescue-stock needs a value"; PARAMRESCUE_STOCK="$2"; shift 2 ;;
++    --paramrescue-stock=*) PARAMRESCUE_STOCK="${1#--paramrescue-stock=}"; shift ;;
++    --paramrescue-extent) [[ $# -ge 2 ]] || die "--paramrescue-extent needs a value"; PARAMRESCUE_EXTENT="$2"; shift 2 ;;
++    --paramrescue-extent=*) PARAMRESCUE_EXTENT="${1#--paramrescue-extent=}"; shift ;;
++    --paramrescue-also) [[ $# -ge 2 ]] || die "--paramrescue-also needs a value"; PARAMRESCUE_ALSO+=("$2"); shift 2 ;;
++    --paramrescue-also=*) PARAMRESCUE_ALSO+=("${1#--paramrescue-also=}"); shift ;;
+     --knobs=*) KNOBS="${1#--knobs=}"; shift ;;
+     -h|--help) usage; exit 0 ;;
+     *) usage >&2; die "unknown argument: $1" ;;
+@@ -82,6 +107,8 @@ done
+ for w in $KNOBS; do
+   [[ "$w" =~ ^t715\.[a-z]+(=[^[:space:]]*)?$ ]] || die "--knobs: '$w' is not a t715.* knob"
+ done
++ALSO_NOTE=
++[[ ${#PARAMRESCUE_ALSO[@]} -eq 0 || -n "$PARAMRESCUE" ]] || die "--paramrescue-also goes with --paramrescue"
+ [[ -f "$INIT_SRC" ]] || die "missing $INIT_SRC"
+ [[ -f "$CPIO_PY" ]] || die "missing $CPIO_PY"
+ mkdir -p "$OUT" "$CACHE"
+@@ -92,6 +119,54 @@ sha256_of() {
+   else shasum -a 256 "$1" | cut -d' ' -f1; fi
+ }
+ 
++# --- the loader the rescue puts back (t715.paramrescue) --------------------
++# --paramrescue IMG --paramrescue-stock SHA256: IMG is a PARAM image with a
++# loader known to work; SHA256 is that of the tablet's stock PARAM, which the
++# rescue leaves alone.  Without that hash the rescue would take the stock
++# image for a loader that did not run.  The option turns the knob on unless
++# --knobs sets it.
++# --paramrescue-extent BYTES: only the first BYTES of the image are the
++# loader (the archive S-Boot reads its logo from), and both sha256 are of
++# those bytes.  S-Boot writes its own data at the end of PARAM whenever it
++# boots a kernel itself (seen 2026-11-25), so a loader followed by such
++# data would else be taken for none.  The rest of PARAM is then never read
++# nor written by the rescue.  Default: the whole image.
++# --paramrescue-also IMG (more than once): other PARAM images with loaders
++# that work, of the same extent: the rescue leaves them alone too (their
++# sha256 go to also.sha256) and never writes them.
++PRDIR="$(mktemp -d)"
++PRSHA=""
++if [[ -n "$PARAMRESCUE" ]]; then
++  [[ -f "$PARAMRESCUE" ]] || die "--paramrescue: $PARAMRESCUE not found"
++  [[ "$PARAMRESCUE_STOCK" =~ ^[0-9a-fA-F]{64}$ ]] || die "--paramrescue needs --paramrescue-stock SHA256 (that of the stock PARAM)"
++  PARAMRESCUE="$(cd "$(dirname "$PARAMRESCUE")" && pwd)/$(basename "$PARAMRESCUE")"
++  if [[ -z "$PARAMRESCUE_EXTENT" ]]; then
++    PARAMRESCUE_EXTENT=$(wc -c <"$PARAMRESCUE" | tr -d ' ')
++  fi
++  [[ "$PARAMRESCUE_EXTENT" =~ ^[1-9][0-9]*$ && "$PARAMRESCUE_EXTENT" -le "$(wc -c <"$PARAMRESCUE" | tr -d ' ')" ]] \
++    || die "--paramrescue-extent: a number of bytes, at most the image's ($(wc -c <"$PARAMRESCUE" | tr -d ' '))"
++  head -c "$PARAMRESCUE_EXTENT" "$PARAMRESCUE" >"$PRDIR/param.img"
++  gzip -n -9 -c "$PRDIR/param.img" >"$PRDIR/param.img.gz"
++  PRSHA="$(sha256_of "$PRDIR/param.img")"
++  rm -f "$PRDIR/param.img"
++  printf '%s\n' "$PRSHA" >"$PRDIR/loader.sha256"
++  printf '%s\n' "$PARAMRESCUE_STOCK" | tr 'A-F' 'a-f' >"$PRDIR/stock.sha256"
++  printf '%s\n' "$PARAMRESCUE_EXTENT" >"$PRDIR/extent"
++  # shellcheck disable=SC2207  # the idiom for a possibly empty array under set -u, bash 3.2 included
++  for also in ${PARAMRESCUE_ALSO[@]+"${PARAMRESCUE_ALSO[@]}"}; do
++    [[ -f "$also" ]] || die "--paramrescue-also: $also not found"
++    head -c "$PARAMRESCUE_EXTENT" "$also" >"$PRDIR/also.img"
++    sha256_of "$PRDIR/also.img" >>"$PRDIR/also.sha256"
++  done
++  rm -f "$PRDIR/also.img"
++  ALSO_NOTE=
++  if [[ ${#PARAMRESCUE_ALSO[@]} -gt 0 ]]; then ALSO_NOTE=", ${#PARAMRESCUE_ALSO[@]} left alone"; fi
++  case " $KNOBS " in
++  *" t715.paramrescue="*) ;;
++  *) KNOBS="${KNOBS:+$KNOBS }t715.paramrescue=1" ;;
++  esac
++fi
++
+ # --- tools image (file, readelf, python3; shellcheck for the tests) -------
+ if ! docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
+   echo ">>> building Docker image $TOOLS_IMAGE"
+@@ -135,7 +210,7 @@ INIT_SHA="$(sha256_of "$INIT_SRC")"
+ # GPU modules, in load order (file names sort in that order).
+ MODDIR="$(mktemp -d)"
+ MODTREE="$(mktemp -d)"
+-trap 'rm -rf "$MODDIR" "$MODTREE"' EXIT
++trap 'rm -rf "$MODDIR" "$MODTREE" "$PRDIR"' EXIT
+ MODREL=""
+ MODSHA=""
+ if [[ -n "$MODULES_TAR" ]]; then
+@@ -154,12 +229,12 @@ if [[ -n "$MODULES_TAR" ]]; then
+ fi
+ # The modules' tarball hash names the tree: /init refreshes a persistent
+ # root's copy when it changes (same release string, other build).
+-BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}"
++BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}${PRSHA:+, paramrescue: the first ${PARAMRESCUE_EXTENT} bytes of PARAM, sha256:${PRSHA:0:12}}$ALSO_NOTE"
+ 
+ # shellcheck disable=SC2016  # expanded by the container's bash
+ docker run --rm --platform linux/arm64 \
+   -v "$DEB:/in/busybox.deb:ro" -v "$FSCK:/in/e2fsck.deb:ro" -v "$INIT_SRC:/in/init:ro" -v "$CPIO_PY:/in/cpio_newc.py:ro" \
+-  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
++  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$PRDIR:/in/paramrescue:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
+ cd /tmp
+ dpkg-deb -x /in/busybox.deb deb
+ dpkg-deb -x /in/e2fsck.deb fsckdeb
+@@ -234,6 +309,13 @@ if os.path.isdir(tree):
+             if os.path.islink(p):
+                 continue
+             items[os.path.join(rel, f)] = (0o100644, open(p, "rb").read(), 0, 0)
++# The loader the rescue puts back (boot/build-initramfs.sh --paramrescue).
++pr = "/in/paramrescue"
++for f in ("param.img.gz", "loader.sha256", "stock.sha256", "extent", "also.sha256"):
++    if os.path.exists(os.path.join(pr, f)):
++        items.setdefault("lib", (0o040755, b"", 0, 0))
++        items.setdefault("lib/t715-paramrescue", (0o040755, b"", 0, 0))
++        items["lib/t715-paramrescue/" + f] = (0o100644, open(os.path.join(pr, f), "rb").read(), 0, 0)
+ for line in open(applets):
+     path = line.strip()
+     if not path or path in ("linuxrc", "sbin/init") or path in items:
+diff --git a/boot/initramfs/init b/boot/initramfs/init
+index cd831ad..6281a4a 100755
+--- a/boot/initramfs/init
++++ b/boot/initramfs/init
+@@ -88,6 +88,11 @@
+ #                        after anything sboot or the boot image could add),
+ #                        the VT cleared and its cursor hidden; say () still
+ #                        writes first-boot progress and errors to the VT
++#   t715.paramrescue=1    a tablet whose only system is started by a loader
++#                        in PARAM: PARAM holding neither the stock image nor
++#                        the loader known to work (/lib/t715-paramrescue),
++#                        that loader is written back and the board restarts
++#                        (see param_rescue); default 0
+ #
+ # Persistent root (a tablet that keeps no Android): instead of steps 3-4,
+ # USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
+@@ -164,11 +169,13 @@ SEED_MARGIN_KIB=524288  # free space a seed must leave on USERDATA (512 MiB)
+ [ -z "$TEST" ] || SEED_MARGIN_KIB=1024
+ TELNET=0            # 1: the root telnet shell on the USB network link
+ FAILREBOOT=1        # 0: wait on screen after a failure instead of rebooting
++PARAMRESCUE=0       # 1: put the loader known to work back in PARAM when it is not there
+ 
+ # --- paths
+ RUNDIR=/run/t715
+ LOGFILE=$RUNDIR/initramfs.log
+ KMSG=/dev/kmsg
++PARAMRESCUE_DIR=/lib/t715-paramrescue   # the loader known to work and the two sha256 (param_rescue)
+ UD_MNT=/userdata            # USERDATA, read-only (read-write for a persistent root)
+ UD_FINAL=$RUNDIR/userdata   # where USERDATA lives after the switch_root
+ LOWER=$RUNDIR/lower         # the image, read-only
+@@ -385,6 +392,9 @@ parse_knobs() {
+         t715.quiet=0 | t715.quiet=1)
+             QUIET=${_pk#*=}
+             ;;
++        t715.paramrescue=0 | t715.paramrescue=1)
++            PARAMRESCUE=${_pk#*=}
++            ;;
+         t715.persist=*)
+             _pk_v=${_pk#*=}
+             if [ "$_pk_v" = 0 ] || persist_name_ok "$_pk_v"; then
+@@ -416,7 +426,7 @@ read_knobs() {
+         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
+     fi
+     parse_knobs "$_rk_cmdline" "cmdline"
+-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG"
++    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE"
+ }
+ 
+ # ---------------------------------------------------------------------------
+@@ -1588,6 +1598,118 @@ do_reboot() {
+     done
+ }
+ 
++# param_rescue: t715.paramrescue, for a tablet whose only system is started
++# by a loader in PARAM (bnuuyloader: it starts the arm64 kernel of a slot of
++# CACHE) and that keeps no other.  S-Boot boots this kernel (BOOT) when the
++# loader hands the boot back, because the arm64 system did not come up, and
++# at once when no loader runs at all: one that fails to fire is never
++# reached again, and nothing on the tablet could then be reached either.
++# So PARAM is looked at first.  $PARAMRESCUE_DIR holds a loader known to
++# work (param.img.gz, gzipped) with its sha256 (loader.sha256) and that of
++# the tablet's stock PARAM (stock.sha256), written by
++# boot/build-initramfs.sh --paramrescue, and the length of that part of
++# PARAM (extent; without the file, the whole image).  Only those first
++# bytes are compared and ever written: S-Boot keeps data of its own at the
++# end of PARAM and writes it whenever it boots a kernel itself (seen
++# 2026-11-25), so a loader followed by such data must still be the loader.
++# That part of PARAM holding either image is left alone, and so is one
++# holding any loader of also.sha256 (others that work, --paramrescue-also):
++# the one the owner put there is respected.  Holding anything else, it is a
++# loader that did not run: the known one is written over it and read back,
++# and the board restarts, which brings the arm64 system back by itself.  With the knob
++# off, a file of the directory missing, an image that is not the one its
++# sha256 announces, no single partition named PARAM, nothing more happens
++# here: the boot goes on to the root image, and so to the failure path and
++# its debug shell, as after a write that does not read back.  A loader
++# known here is one tablet's own PARAM: such an image is never published.
++# Host-test: the write is real (the test's loop disk) and exit 98 replaces
++# the restart.
++param_rescue() {
++    [ "$PARAMRESCUE" = 1 ] || return 0
++    if [ ! -s "$PARAMRESCUE_DIR/param.img.gz" ] || [ ! -s "$PARAMRESCUE_DIR/loader.sha256" ] ||
++        [ ! -s "$PARAMRESCUE_DIR/stock.sha256" ]; then
++        warn "t715.paramrescue: $PARAMRESCUE_DIR lacks a file, nothing done"
++        return 0
++    fi
++    _pr_known=$(cut -d' ' -f1 "$PARAMRESCUE_DIR/loader.sha256")
++    _pr_stock=$(cut -d' ' -f1 "$PARAMRESCUE_DIR/stock.sha256")
++    if [ "$(zcat "$PARAMRESCUE_DIR/param.img.gz" | sha256sum | cut -d' ' -f1)" != "$_pr_known" ]; then
++        warn "t715.paramrescue: param.img.gz is not the image loader.sha256 announces, nothing done"
++        return 0
++    fi
++    _pr_hits=$(list_partnames | while read -r _pr_d _pr_n; do
++        if [ "$_pr_n" = PARAM ]; then printf '%s ' "$_pr_d"; fi
++    done)
++    set -f
++    # shellcheck disable=SC2086  # count the words
++    set -- $_pr_hits
++    set +f
++    if [ "$#" -ne 1 ] || [ ! -b "/dev/$1" ]; then
++        warn "t715.paramrescue: no single partition named PARAM (${_pr_hits:-none}), nothing done"
++        return 0
++    fi
++    _pr_dev=/dev/$1
++    _pr_size=$(cat "$PARAMRESCUE_DIR/extent" 2>/dev/null)
++    [ -n "$_pr_size" ] || _pr_size=$(zcat "$PARAMRESCUE_DIR/param.img.gz" | wc -c)
++    case $_pr_size in
++    '' | *[!0-9]*)
++        warn "t715.paramrescue: the loader's length is not a number ('$_pr_size'), nothing done"
++        return 0
++        ;;
++    esac
++    _pr_sum=$(head -c "$_pr_size" "$_pr_dev" | sha256sum | cut -d' ' -f1)
++    if [ "$_pr_sum" = "$_pr_known" ]; then
++        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold the loader known to work, nothing to do"
++        return 0
++    fi
++    if [ "$_pr_sum" = "$_pr_stock" ]; then
++        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold the stock image, no loader: nothing to do"
++        return 0
++    fi
++    if [ -s "$PARAMRESCUE_DIR/also.sha256" ] && grep -qx "$_pr_sum" "$PARAMRESCUE_DIR/also.sha256"; then
++        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold another loader known to work, nothing to do"
++        return 0
++    fi
++    say "Rescue: PARAM does not hold the loader known to work. Writing it back."
++    log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) read back $_pr_sum: neither the loader known to work nor the stock image, writing the loader"
++    # Where it differs from the loader, for the record.
++    _pr_diff=$(zcat "$PARAMRESCUE_DIR/param.img.gz" | cmp -l - "$_pr_dev" 2>/dev/null | head -n 4096)
++    _pr_n=$(printf '%s\n' "$_pr_diff" | grep -c .)
++    _pr_at=$(printf '%s\n' "$_pr_diff" | head -n 1 | cut -d' ' -f1)
++    log "t715.paramrescue: at least $_pr_n byte(s) of PARAM differ from the loader, the first at byte ${_pr_at:-none} (what follows the loader is not compared)"
++    if [ -n "$_pr_at" ]; then
++        _pr_skip=$(( (_pr_at - 1) / 16 ))
++        log "  PARAM there:      $(dd if="$_pr_dev" bs=16 skip=$_pr_skip count=4 2>/dev/null | od -An -tx1 | tr -s ' \n' ' ')"
++        log "  the loader there: $(zcat "$PARAMRESCUE_DIR/param.img.gz" | dd bs=16 skip=$_pr_skip count=4 2>/dev/null | od -An -tx1 | tr -s ' \n' ' ')"
++    fi
++    # The system of every day keeps PARAM read-only by one of its own rules:
++    # a partition's flag is cleared here, a whole disk's is not.
++    if [ "$(cat "/sys/class/block/${_pr_dev#/dev/}/ro" 2>/dev/null)" = 1 ]; then
++        if run blockdev --setrw "$_pr_dev"; then
++            log "t715.paramrescue: PARAM was read-only, made writable"
++        else
++            err "t715.paramrescue: PARAM is read-only and could not be made writable"
++        fi
++    fi
++    if ! zcat "$PARAMRESCUE_DIR/param.img.gz" | dd of="$_pr_dev" bs=1M conv=fsync 2>/dev/null; then
++        err "t715.paramrescue: the write to $_pr_dev failed"
++    fi
++    sync
++    _pr_sum=$(head -c "$_pr_size" "$_pr_dev" | sha256sum | cut -d' ' -f1)
++    if [ "$_pr_sum" != "$_pr_known" ]; then
++        say "Rescue: PARAM could not be restored. Hold Power and Volume down to restart."
++        err "t715.paramrescue: PARAM reads back $_pr_sum after the write, not the loader known to work"
++        return 1
++    fi
++    say "Rescue: the loader known to work is back in PARAM. Restarting."
++    log "t715.paramrescue: PARAM reads back as the loader known to work: restarting"
++    [ -n "$TEST" ] || sleep 5
++    if [ -n "$TEST" ]; then
++        exit 98
++    fi
++    do_reboot
++}
++
+ # save_crashlog: t715.crashlog, see the knob list at the top.  Called by
+ # wdt_guard after a watchdog reset, just before its restart, whose own short
+ # boot would otherwise overwrite the pstore console of the boot that hung
+@@ -1705,6 +1827,10 @@ main() {
+     # The debug link (DHCP with telnet off, telnetd with t715.telnet=1) is
+     # up before the first seed: its progress takes minutes.
+     net_up || warn "USB debug link not available, booting without it"
++    # The loader first: when it has to be put back in PARAM, the restart that
++    # follows needs nothing else.  The link is up, so the debug shell is there
++    # should the write fail.
++    param_rescue
+     if prepare_root; then
+         if [ "$SHELL_MODE" = 1 ]; then
+             shell_wait
+diff --git a/boot/tests/test_initramfs.sh b/boot/tests/test_initramfs.sh
+index 10f5845..283bc43 100755
+--- a/boot/tests/test_initramfs.sh
++++ b/boot/tests/test_initramfs.sh
+@@ -37,6 +37,24 @@
+ #     keeping the eMMC's and the test loop disk's names, and a boot with a
+ #     second disk also named USERDATA is still refused.
+ #
++#     The loader's rescue (t715.paramrescue: a tablet whose only system is
++#     started by a loader in PARAM).  The disk has an 8 MiB PARAM that starts
++#     with the loader the rescue knows, and a second initramfs is built with
++#     --paramrescue (reproducible too; the option refuses to build without the
++#     stock PARAM's sha256).  PARAM holding anything else, /init writes the
++#     known loader there and exits 98 instead of restarting.  The knob off,
++#     the stock image, the known loader, the files missing, an image that is
++#     not the one its sha256 announces, a disk that cannot be written and a
++#     disk with no partition named PARAM: nothing is written, and the boot
++#     goes on to the failure path (exit 99).  PARAM flagged read-only (a flag
++#     of the system of every day): cleared, and the loader written.  Then a
++#     rescue whose loader is only the first half of PARAM
++#     (--paramrescue-extent 4194304): data S-Boot wrote after the loader
++#     changes nothing (the loader, the stock image: nothing done, the data
++#     kept), a change inside the loader's part is written over and what
++#     follows is kept, a loader of the list of those left alone
++#     (--paramrescue-also) is left alone, a malformed length is refused.
++#
+ # Usage: bash boot/tests/test_initramfs.sh
+ # (internal: --in-container CPIO_GZ, run inside the test container)
+ set -euo pipefail
+@@ -244,14 +262,18 @@ make_fixtures() {
+   mkfs.ext4 -q -F -d "$u" "$W/userdata.img" 64M
+ 
+   # GPT disk: USERDATA is the 3rd partition (found by name, not number).
++  # PARAM is the 4th, 8 MiB as on the tablet, holding the loader the rescue
++  # knows (/t/param-known.img).
+   truncate -s 80M "$W/disk.img"
+   sfdisk -q "$W/disk.img" <<'EOF'
+ label: gpt
+ start=2048, size=2048, name=EFS
+ start=4096, size=8192, name=SYSTEM
+ start=12288, size=131072, name=USERDATA
++start=143360, size=16384, name=PARAM
+ EOF
+   dd if="$W/userdata.img" of="$W/disk.img" bs=512 seek=12288 conv=notrunc status=none
++  dd if=/t/param-known.img of="$W/disk.img" bs=512 seek=143360 conv=notrunc status=none
+ }
+ 
+ disk_sums() {
+@@ -260,10 +282,10 @@ disk_sums() {
+   echo "userdata=$(dd if="$W/disk.img" bs=512 skip=12288 count=131072 status=none | sha256sum | cut -d' ' -f1)"
+ }
+ 
+-attach_disk() {
++attach_disk() {  # [IMAGE]: the disk image to attach (the fixtures' by default)
+   local n
+   n=$(losetup -f)
+-  losetup -P "$(node "$n")" "$W/disk.img"
++  losetup -P "$(node "$n")" "${1:-$W/disk.img}"
+   LOOPS+=("$n")
+   OUTER=$n
+   local i
+@@ -439,6 +461,272 @@ scenario_badpath() {
+ # with_userdata CMD...: run CMD with USERDATA (the attached disk's p3)
+ # mounted on $W/ud.
+ # The read-only boots left BLKROSET on that device: cleared first.
++param_dev() { echo "$(node "$OUTER")p4"; }
++param_is() { cmp -s "$1" "$(param_dev)"; }   # PARAM holds exactly this image
++set_param() {
++  local d i
++  d=$(param_dev)
++  # devtmpfs makes the node a moment after the partition appears: wait for it.
++  # Never write where the node is not there yet: dd would make a plain file of
++  # that name in devtmpfs, which every later run would then find in place of
++  # the partition (seen 2026-11-25, and /init rightly refused it).
++  for ((i = 0; i < 20; i++)); do
++    [ -b "$d" ] && break
++    sleep 0.5
++  done
++  [ -b "$d" ] || { echo "  FAIL  PARAM is not a block device here ($d)"; NFAIL=$((NFAIL + 1)); return 1; }
++  dd if="$1" of="$d" bs=1M conv=fsync status=none
++}
++set_param_other() {  # PARAM holds neither image: the stock one, one byte changed
++  cp /t/param-stock.img "$W/param-other.img"
++  printf '\x5a' | dd of="$W/param-other.img" bs=1 seek=4096 conv=notrunc status=none
++  set_param "$W/param-other.img"
++}
++RESCUE_CPIO=/t/initramfs-rescue.cpio.gz   # a scenario may take another rescue's initramfs
++prepare_rescue_boot() {  # NAME [KNOBS]: as prepare_boot, with the rescue's initramfs
++  local cpio=$CPIO
++  CPIO=$RESCUE_CPIO
++  prepare_boot "$@"
++  CPIO=$cpio
++}
++# Every scenario: the root image is missing, so a boot that goes on past the
++# rescue ends in the failure path after 2 s (exit 99).
++PR_FAIL="t715.rootimg=media/0/linux/nope.img t715.rootwait=30 t715.failwait=2"
++
++scenario_param_off() {
++  echo "--- scenario: t715.paramrescue=0: PARAM is never touched"
++  set_param_other
++  prepare_rescue_boot proof "t715.paramrescue=0"
++  local rc=0
++  run_init proof "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "nothing done" sh -c "! grep -q 't715.paramrescue: ' '$W/proof.log'"
++  check "PARAM still holds the other content" param_is "$W/param-other.img"
++  [[ $rc -eq 99 ]] || show_log proof
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_stock() {
++  echo "--- scenario: PARAM holds the stock image: left alone"
++  set_param /t/param-stock.img
++  prepare_rescue_boot prstock
++  local rc=0
++  run_init prstock "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "the knob is on by default with --paramrescue" grep -qx t715.paramrescue=1 "$W/root-prstock/etc/t715-knobs"
++  check "logged: the stock image, nothing done" log_has prstock "bytes of PARAM (/dev/loop0p4) hold the stock image, no loader: nothing to do"
++  check "PARAM still holds the stock image" param_is /t/param-stock.img
++  [[ $rc -eq 99 ]] || show_log prstock
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_known() {
++  echo "--- scenario: PARAM holds the loader known to work: left alone"
++  set_param /t/param-known.img
++  prepare_rescue_boot prknown
++  local rc=0
++  run_init prknown "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: the known loader, nothing done" log_has prknown "bytes of PARAM (/dev/loop0p4) hold the loader known to work, nothing to do"
++  check "PARAM still holds the known loader" param_is /t/param-known.img
++  [[ $rc -eq 99 ]] || show_log prknown
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_unknown() {
++  echo "--- scenario: PARAM holds neither: the known loader is written back, then the restart (exit 98)"
++  set_param_other
++  prepare_rescue_boot prunknown
++  local rc=0
++  run_init prunknown "$PR_FAIL" || rc=$?
++  check "exit 98: the restart after the write (got $rc)" test "$rc" -eq 98
++  check "said on screen: writing it back" log_has prunknown "t715-say: Rescue: PARAM does not hold the loader known to work. Writing it back."
++  check "said on screen: back in PARAM, restarting" log_has prunknown "t715-say: Rescue: the loader known to work is back in PARAM. Restarting."
++  check "logged: PARAM holds neither, writing the loader" log_has prunknown "bytes of PARAM (/dev/loop0p4) read back"
++  check "logged: neither image, writing the loader" log_has prunknown "neither the loader known to work nor the stock image, writing the loader"
++  check "logged: where PARAM differs" log_has prunknown "differ from the loader, the first at byte"
++  check "logged: reads back, restarting" log_has prunknown "t715.paramrescue: PARAM reads back as the loader known to work: restarting"
++  check "the failure path was not reached" sh -c "! grep -q 'boot stopped' '$W/prunknown.log'"
++  check "PARAM now holds the loader known to work" param_is /t/param-known.img
++  [[ $rc -eq 98 ]] || show_log prunknown
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_nofiles() {
++  echo "--- scenario: the rescue's files are missing (the plain initramfs, the knob on the command line)"
++  set_param_other
++  prepare_boot prnofiles
++  local rc=0
++  run_init prnofiles "$PR_FAIL t715.paramrescue=1" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: a file lacks, nothing done" log_has prnofiles "t715.paramrescue: /lib/t715-paramrescue lacks a file, nothing done"
++  check "PARAM still holds the other content" param_is "$W/param-other.img"
++  [[ $rc -eq 99 ]] || show_log prnofiles
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_wrongimage() {
++  echo "--- scenario: the image is not the one loader.sha256 announces"
++  set_param_other
++  prepare_rescue_boot prwrong
++  printf '%064d\n' 0 >"$W/root-prwrong/lib/t715-paramrescue/loader.sha256"
++  local rc=0
++  run_init prwrong "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: not the announced image, nothing done" log_has prwrong "t715.paramrescue: param.img.gz is not the image loader.sha256 announces, nothing done"
++  check "PARAM still holds the other content" param_is "$W/param-other.img"
++  [[ $rc -eq 99 ]] || show_log prwrong
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_ro() {
++  echo "--- scenario: PARAM cannot be written (the whole disk read-only): the boot goes on to the failure path"
++  set_param_other
++  prepare_rescue_boot prro
++  blockdev --setro "$(node "$OUTER")"
++  local rc=0
++  run_init prro "$PR_FAIL" || rc=$?
++  blockdev --setrw "$(node "$OUTER")"
++  check "exit 99: the failure path after the failed write (got $rc)" test "$rc" -eq 99
++  check "said on screen: could not be restored" log_has prro "t715-say: Rescue: PARAM could not be restored. Hold Power and Volume down to restart."
++  check "logged: the write failed" log_has prro "ERROR: t715.paramrescue: the write to"
++  check "PARAM still holds the other content" param_is "$W/param-other.img"
++  [[ $rc -eq 99 ]] || show_log prro
++  ip link del usb0 2>/dev/null || true
++}
++
++# PARAM flagged read-only as the system of every day leaves it: the flag is cleared.
++scenario_param_roflag() {
++  echo "--- scenario: PARAM flagged read-only: made writable, the known loader is written back (exit 98)"
++  set_param_other
++  prepare_rescue_boot prflag
++  blockdev --setro "$(param_dev)"
++  local rc=0
++  run_init prflag "$PR_FAIL" || rc=$?
++  blockdev --setrw "$(param_dev)"
++  check "exit 98: the restart after the write (got $rc)" test "$rc" -eq 98
++  check "logged: made writable" log_has prflag "t715.paramrescue: PARAM was read-only, made writable"
++  check "PARAM now holds the loader known to work" param_is /t/param-known.img
++  [[ $rc -eq 98 ]] || show_log prflag
++  ip link del usb0 2>/dev/null || true
++}
++
++# --- the loader is only the first EXTENT bytes of PARAM (build-initramfs.sh
++# --- --paramrescue-extent): what follows is S-Boot's own data.
++EXTENT=4194304
++set_param_tail() {  # bytes S-Boot wrote after the loader
++  printf 'S-Boot data' | dd of="$(param_dev)" bs=1 seek=5000000 conv=notrunc status=none
++}
++param_head_is() {  # the loader's part of PARAM is this image's
++  cmp -s <(head -c "$EXTENT" "$1") <(head -c "$EXTENT" "$(param_dev)")
++}
++param_tail_kept() { [ "$(dd if="$(param_dev)" bs=1 skip=5000000 count=11 status=none)" = "S-Boot data" ]; }
++
++scenario_param_extent_loader() {
++  echo "--- scenario: extent: the loader, then data S-Boot wrote: nothing done, the data kept"
++  set_param /t/param-known.img
++  set_param_tail
++  RESCUE_CPIO=/t/initramfs-rescue-extent.cpio.gz prepare_rescue_boot extloader
++  local rc=0
++  run_init extloader "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: the first bytes hold the loader, nothing done" \
++    log_has extloader "the first $EXTENT bytes of PARAM (/dev/loop0p4) hold the loader known to work, nothing to do"
++  check "S-Boot's data kept" param_tail_kept
++  [[ $rc -eq 99 ]] || show_log extloader
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_extent_stock() {
++  echo "--- scenario: extent: the stock image, then data S-Boot wrote: nothing done"
++  set_param /t/param-stock.img
++  set_param_tail
++  RESCUE_CPIO=/t/initramfs-rescue-extent.cpio.gz prepare_rescue_boot extstock
++  local rc=0
++  run_init extstock "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: the first bytes hold the stock image, nothing done" \
++    log_has extstock "the first $EXTENT bytes of PARAM (/dev/loop0p4) hold the stock image, no loader: nothing to do"
++  check "S-Boot's data kept" param_tail_kept
++  [[ $rc -eq 99 ]] || show_log extstock
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_extent_unknown() {
++  echo "--- scenario: extent: a change inside the loader's part: written over, what follows kept (exit 98)"
++  cp /t/param-known.img "$W/param-changed.img"          # the loader with one byte changed
++  printf '\x5a' | dd of="$W/param-changed.img" bs=1 seek=4096 conv=notrunc status=none
++  set_param "$W/param-changed.img"
++  set_param_tail
++  RESCUE_CPIO=/t/initramfs-rescue-extent.cpio.gz prepare_rescue_boot extunknown
++  local rc=0
++  run_init extunknown "$PR_FAIL" || rc=$?
++  check "exit 98: the restart after the write (got $rc)" test "$rc" -eq 98
++  check "logged: the first bytes hold neither, writing the loader" \
++    log_has extunknown "the first $EXTENT bytes of PARAM (/dev/loop0p4) read back"
++  check "logged: neither image, writing the loader" \
++    log_has extunknown "neither the loader known to work nor the stock image, writing the loader"
++  check "logged: the difference is at the byte that was changed" log_has extunknown "the first at byte 4097"
++  check "logged: what follows the loader is not compared" log_has extunknown "(what follows the loader is not compared)"
++  check "the loader's part now holds the known loader" param_head_is /t/param-known.img
++  check "S-Boot's data kept" param_tail_kept
++  [[ $rc -eq 98 ]] || show_log extunknown
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_also() {
++  echo "--- scenario: extent: a loader of the list of those left alone: nothing done"
++  set_param /t/param-third.img
++  set_param_tail
++  RESCUE_CPIO=/t/initramfs-rescue-extent.cpio.gz prepare_rescue_boot pralso
++  local rc=0
++  run_init pralso "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: another loader known to work, nothing done" \
++    log_has pralso "the first $EXTENT bytes of PARAM (/dev/loop0p4) hold another loader known to work, nothing to do"
++  check "the loader left as it was" param_head_is /t/param-third.img
++  check "S-Boot's data kept" param_tail_kept
++  [[ $rc -eq 99 ]] || show_log pralso
++  ip link del usb0 2>/dev/null || true
++}
++
++scenario_param_extent_bad() {
++  echo "--- scenario: extent: the loader's length is not a number: nothing done"
++  set_param_other
++  RESCUE_CPIO=/t/initramfs-rescue-extent.cpio.gz prepare_rescue_boot extbad
++  printf 'abc\n' >"$W/root-extbad/lib/t715-paramrescue/extent"
++  local rc=0
++  run_init extbad "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: the length is not a number, nothing done" \
++    log_has extbad "t715.paramrescue: the loader's length is not a number ('abc'), nothing done"
++  check "PARAM still holds the other content" param_is "$W/param-other.img"
++  [[ $rc -eq 99 ]] || show_log extbad
++  ip link del usb0 2>/dev/null || true
++}
++
++# Another disk, with no partition named PARAM at all.
++scenario_param_nopart() {
++  echo "--- scenario: no partition named PARAM: nothing done"
++  truncate -s 80M "$W/disk-noparam.img"
++  sfdisk -q "$W/disk-noparam.img" <<'PARTS'
++label: gpt
++start=2048, size=2048, name=EFS
++start=4096, size=8192, name=SYSTEM
++start=12288, size=131072, name=USERDATA
++PARTS
++  dd if="$W/userdata.img" of="$W/disk-noparam.img" bs=512 seek=12288 conv=notrunc status=none
++  attach_disk "$W/disk-noparam.img" || { ko "the disk without PARAM could not be attached"; return 1; }
++  prepare_rescue_boot prnopart
++  local rc=0
++  run_init prnopart "$PR_FAIL" || rc=$?
++  check "the boot went on to the failure path (exit 99, got $rc)" test "$rc" -eq 99
++  check "logged: no single partition named PARAM, nothing done" log_has prnopart "t715.paramrescue: no single partition named PARAM (none), nothing done"
++  [[ $rc -eq 99 ]] || show_log prnopart
++  ip link del usb0 2>/dev/null || true
++  detach_disk
++}
++
+ with_userdata() {
+   mkdir -p "$W/ud"
+   blockdev --setrw "$(node "$OUTER")p3" || return 1
+@@ -768,6 +1056,28 @@ in_container() {
+   mount -t tmpfs -o size=512m,mode=0755 t715-test "$W"
+   mkdir -p "$W/dev"
+   mount -t devtmpfs devtmpfs "$W/dev"
++  # A plain file named like a partition, left by a run that wrote before the
++  # node was there, hides the partition in every later run of this machine.
++  local stale backing
++  for stale in "$W"/dev/loop*p[0-9]*; do
++    if [ -f "$stale" ]; then
++      echo "        removed a stale file from devtmpfs: ${stale##*/}"
++      rm -f "$stale"
++    fi
++  done
++  # A loop device still attached to a test disk whose run was interrupted
++  # (its image is gone) would bring a second USERDATA to every boot.
++  for stale in $(losetup -a 2>/dev/null | awk -F: '{print $1}'); do
++    backing=$(losetup -n "$(node "$stale")" 2>/dev/null) || continue
++    case ${backing##*/} in
++    disk*.img)
++      if [ ! -e "$backing" ]; then
++        echo "        detached a leftover loop device: $stale (${backing##*/} is gone)"
++        losetup -d "$(node "$stale")" 2>/dev/null || true
++      fi
++      ;;
++    esac
++  done
+ 
+   echo "--- fixtures"
+   make_fixtures
+@@ -800,6 +1110,21 @@ in_container() {
+   scenario_persist_sidecar two-lines
+   scenario_persist_space
+   detach_inner_loops
++  # The loader's rescue: it writes PARAM only in its one case.
++  scenario_param_off
++  scenario_param_stock
++  scenario_param_known
++  scenario_param_unknown
++  scenario_param_nofiles
++  scenario_param_wrongimage
++  scenario_param_ro
++  scenario_param_roflag
++  scenario_param_extent_loader
++  scenario_param_extent_stock
++  scenario_param_extent_unknown
++  scenario_param_also
++  scenario_param_extent_bad
++  set_param /t/param-known.img
+   # Two disks both carrying USERDATA, the outer one still attached: the
+   # boot must refuse to guess (both are plain disks here, so this is the
+   # refusal the eMMC-only lookup must keep once a card's names are out).
+@@ -807,6 +1132,7 @@ in_container() {
+   detach_disk
+   check_list_partnames
+   scenario_nouserdata
++  scenario_param_nopart
+ 
+   sync
+   dd if="$W/disk.img" of="$W/ud-check.img" bs=512 skip=12288 count=131072 status=none
+@@ -816,7 +1142,10 @@ in_container() {
+   [[ $NFAIL -eq 0 ]]
+ }
+ 
+-if [[ "${1:-}" == --in-container ]]; then
++if [[ "${T715_TEST_SOURCE_ONLY:-}" == 1 ]]; then
++  # shellcheck disable=SC2317  # reached when the script is sourced
++  return 0  # the functions only, for an ad hoc run inside the test container
++elif [[ "${1:-}" == --in-container ]]; then
+   in_container "$2"
+   exit
+ fi
+@@ -844,6 +1173,73 @@ fi
+ SIZE=$(wc -c <"$TMP/a/initramfs.cpio.gz" | tr -d ' ')
+ echo "        initramfs.cpio.gz: $SIZE bytes ($((SIZE / 1024)) KiB)"
+ 
++echo "=== 1b. build with --paramrescue (the loader the rescue puts back)"
++sha256_of() {
++  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
++  else shasum -a 256 "$1" | cut -d' ' -f1; fi
++}
++# Two PARAM images of the tablet's size: the loader the rescue knows, and
++# what the stock PARAM would be.
++head -c 8388608 /dev/urandom >"$TMP/param-known.img"
++head -c 8388608 /dev/urandom >"$TMP/param-stock.img"
++STOCK_SHA=$(sha256_of "$TMP/param-stock.img")
++for d in r s; do
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/$d" --paramrescue "$TMP/param-known.img" \
++    --paramrescue-stock "$STOCK_SHA" >"$TMP/build-$d.log" 2>&1 || { cat "$TMP/build-$d.log"; exit 1; }
++done
++if cmp -s "$TMP/r/initramfs.cpio.gz" "$TMP/s/initramfs.cpio.gz"; then
++  echo "  PASS  two builds with --paramrescue byte-identical"
++else
++  echo "  FAIL  two builds with --paramrescue differ"; HFAIL=$((HFAIL + 1))
++fi
++for f in lib/t715-paramrescue/param.img.gz lib/t715-paramrescue/loader.sha256 lib/t715-paramrescue/stock.sha256; do
++  if grep -q " $f\$" "$TMP/r/initramfs.manifest.txt"; then echo "  PASS  the archive has $f"
++  else echo "  FAIL  the archive lacks $f"; HFAIL=$((HFAIL + 1)); fi
++done
++refused() {  # DESCRIPTION COMMAND...
++  local d=$1; shift
++  if "$@" >/dev/null 2>&1; then echo "  FAIL  $d: built"; HFAIL=$((HFAIL + 1))
++  else echo "  PASS  $d: refused"; fi
++}
++refused "--paramrescue without --paramrescue-stock" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-none" --paramrescue "$TMP/param-known.img"
++refused "--paramrescue with a malformed sha256" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-short" --paramrescue "$TMP/param-known.img" --paramrescue-stock abc
++refused "--paramrescue with no such image" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-missing" --paramrescue "$TMP/no-such.param" \
++  --paramrescue-stock "$STOCK_SHA"
++# The loader as only the first half of the image: reproducible, and with its
++# length.  The stock image's sha256 is of its first half too.
++head -c 4194304 "$TMP/param-stock.img" >"$TMP/param-stock-head.img"
++STOCK_HEAD_SHA=$(sha256_of "$TMP/param-stock-head.img")
++head -c 8388608 /dev/urandom >"$TMP/param-third.img"      # a loader the rescue only leaves alone
++for d in e f; do
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/$d" --paramrescue "$TMP/param-known.img" \
++    --paramrescue-stock "$STOCK_HEAD_SHA" --paramrescue-extent 4194304 --paramrescue-also "$TMP/param-third.img" \
++    >"$TMP/build-$d.log" 2>&1 || { cat "$TMP/build-$d.log"; exit 1; }
++done
++if cmp -s "$TMP/e/initramfs.cpio.gz" "$TMP/f/initramfs.cpio.gz"; then
++  echo "  PASS  two builds with --paramrescue-extent byte-identical"
++else
++  echo "  FAIL  two builds with --paramrescue-extent differ"; HFAIL=$((HFAIL + 1))
++fi
++for f in lib/t715-paramrescue/extent lib/t715-paramrescue/also.sha256; do
++  if grep -q " $f\$" "$TMP/e/initramfs.manifest.txt"; then echo "  PASS  the archive has $f"
++  else echo "  FAIL  the archive lacks $f"; HFAIL=$((HFAIL + 1)); fi
++done
++refused "--paramrescue-also with no such image" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-also" --paramrescue "$TMP/param-known.img" \
++  --paramrescue-stock "$STOCK_SHA" --paramrescue-extent 4194304 --paramrescue-also "$TMP/no-such.param"
++refused "--paramrescue-extent 0" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-zero" --paramrescue "$TMP/param-known.img" \
++  --paramrescue-stock "$STOCK_SHA" --paramrescue-extent 0
++refused "--paramrescue-extent beyond the image" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-beyond" --paramrescue "$TMP/param-known.img" \
++  --paramrescue-stock "$STOCK_SHA" --paramrescue-extent 99999999
++refused "--paramrescue-extent not a number" \
++  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-words" --paramrescue "$TMP/param-known.img" \
++  --paramrescue-stock "$STOCK_SHA" --paramrescue-extent half
++
+ echo "=== 2. shellcheck"
+ if docker run --rm --platform linux/arm64 \
+     -v "$ROOT/boot/initramfs/init:/c/init:ro" \
+@@ -869,6 +1265,11 @@ fi
+ if docker run --rm --privileged --platform linux/arm/v7 --network none \
+     -v "$ROOT/boot/tests/test_initramfs.sh:/t/test_initramfs.sh:ro" \
+     -v "$TMP/a/initramfs.cpio.gz:/t/initramfs.cpio.gz:ro" \
++    -v "$TMP/r/initramfs.cpio.gz:/t/initramfs-rescue.cpio.gz:ro" \
++    -v "$TMP/e/initramfs.cpio.gz:/t/initramfs-rescue-extent.cpio.gz:ro" \
++    -v "$TMP/param-known.img:/t/param-known.img:ro" \
++    -v "$TMP/param-stock.img:/t/param-stock.img:ro" \
++    -v "$TMP/param-third.img:/t/param-third.img:ro" \
+     "$TEST_IMAGE" bash /t/test_initramfs.sh --in-container /t/initramfs.cpio.gz; then
+   :
+ else

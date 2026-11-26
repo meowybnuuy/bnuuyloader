@@ -1,0 +1,22 @@
+# What the loader needs from the tablet's owner, and what it builds. Never committed: the two dumps
+# are Samsung's firmware and hold the tablet's identifiers; a PARAM image is a fingerprint of a unit.
+loader/dumps/
+loader/venv/
+loader/out/
+loader/.scripts-*/
+__pycache__/
+*.pyc
+*.o
+*.elf
+*.bin
+*.img
+*.param
+*.raw
+*.dtb
+*.dtbo
+*.ko
+*.tar
+*.tar.*
+*.gz
+*.xz
+*.zst

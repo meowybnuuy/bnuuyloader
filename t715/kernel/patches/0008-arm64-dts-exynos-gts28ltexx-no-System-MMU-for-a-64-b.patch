@@ -1,0 +1,111 @@
+From 7880ba09bcb780f1c0ed41d5bf3a1494c59a8ea7 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 12:00:00 +0000
+Subject: [PATCH] arm64: dts: exynos: gts28ltexx: no System MMU for a 64-bit
+ kernel
+
+The System MMU driver is not built (the 32-bit board turned it back off:
+Hyprland keeps imports alive and exhausted DECON's IOVA window).  A 32-bit
+kernel has no OF_IOMMU and ignores "iommus"; arm64 selects IOMMU_DMA and
+with it OF_IOMMU, so of_iommu_xlate() waited for a driver that never
+binds and DECON, the scalers, JPEG and MFC probed only at the
+deferred-probe timeout, 16.9 s into the boot: the panel stayed black
+behind the bootloader's logo until then, and no splash could show.
+
+Disable the twelve System MMUs: an unavailable node is no supplier, the
+masters probe at once and map their buffers directly, as on 32-bit.
+DECON now binds at 0.5 s.  The compiled tree differs from the previous
+one by the twelve status properties only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-no-sysmmu.dtsi      | 67 +++++++++++++++++++
+ .../boot/dts/exynos/exynos5433-gts28ltexx.dts |  1 +
+ 2 files changed, 68 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-no-sysmmu.dtsi
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-no-sysmmu.dtsi b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-no-sysmmu.dtsi
+new file mode 100644
+index 000000000..58d0cf699
+--- /dev/null
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx-no-sysmmu.dtsi
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): no System MMU for a 64-bit kernel.
++ *
++ * Neither kernel builds the System MMU driver (CONFIG_EXYNOS_IOMMU is unset:
++ * the 32-bit board turned it back off, the leak of imported buffers it lets
++ * Hyprland build up is not fixed).  A 32-bit kernel without it has no
++ * CONFIG_OF_IOMMU and ignores the "iommus" of DECON, the scalers, JPEG and
++ * MFC.  arm64 selects IOMMU_DMA, hence OF_IOMMU: of_iommu_xlate() then waits
++ * for a driver that never binds, and every one of those masters probes only
++ * at the deferred-probe timeout, about 17 s into the boot.  The panel stayed
++ * black until then, behind the bootloader's logo.
++ *
++ * A disabled System MMU is no supplier (of_iommu_xlate() returns -ENODEV for
++ * an unavailable node): the masters probe at once and map their buffers
++ * directly, as on 32-bit.  The two TV System MMUs serve the second DECON,
++ * which the board disables; they go too, so that nothing points at a System
++ * MMU that could probe if the driver is ever built for one of the others.
++ */
++
++&sysmmu_decon0x {
++	status = "disabled";
++};
++
++&sysmmu_decon1x {
++	status = "disabled";
++};
++
++&sysmmu_tv0x {
++	status = "disabled";
++};
++
++&sysmmu_tv1x {
++	status = "disabled";
++};
++
++&sysmmu_gscl0 {
++	status = "disabled";
++};
++
++&sysmmu_gscl1 {
++	status = "disabled";
++};
++
++&sysmmu_gscl2 {
++	status = "disabled";
++};
++
++&sysmmu_scaler_0 {
++	status = "disabled";
++};
++
++&sysmmu_scaler_1 {
++	status = "disabled";
++};
++
++&sysmmu_jpeg {
++	status = "disabled";
++};
++
++&sysmmu_mfc_0 {
++	status = "disabled";
++};
++
++&sysmmu_mfc_1 {
++	status = "disabled";
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+index fd2922880..0717a8ca6 100644
+--- a/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
++++ b/arch/arm64/boot/dts/exynos/exynos5433-gts28ltexx.dts
+@@ -11,3 +11,4 @@
+ #include <arm/samsung/exynos5433-gts28ltexx.dts>
+ #include "exynos5433-gts28ltexx-smp.dtsi"
+ #include "exynos5433-gts28ltexx-stage1.dtsi"
++#include "exynos5433-gts28ltexx-no-sysmmu.dtsi"
+-- 
+2.52.0
+
